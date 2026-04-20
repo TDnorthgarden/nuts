@@ -84,7 +84,8 @@ sequenceDiagram
     participant Containerd as containerd
     participant NRI as NRI Plugin
     participant PolicyEngine as 策略引擎
-    participant Collector as Collector
+    participant TaskScheduler as 任务调度器
+    participant Collector as 采集器
     participant Aggregation as 聚合引擎
     participant Diagnostic as 诊断引擎
     participant DB as 数据库
@@ -94,25 +95,21 @@ sequenceDiagram
     NRI->>PolicyEngine: 推送事件
     PolicyEngine->>PolicyEngine: 匹配策略
     alt 策略匹配成功
-        PolicyEngine->>Collector: 启动采集(gRPC)
-        PolicyEngine->>Aggregation: 创建聚合任务
-        Collector->>DB: 写入事件数据
-        Aggregation->>DB: 读取事件数据
-        Aggregation->>Aggregation: 聚合处理
-        Aggregation->>DB: 写入审计数据
-        Aggregation->>Diagnostic: 通知诊断
-        Diagnostic->>DB: 读取审计数据
+        PolicyEngine->>TaskScheduler: 创建任务(状态:采集)
+        TaskScheduler->>Collector: 通知开始采集
+        Collector->>Collector: 采集数据
+        Collector->>TaskScheduler: 采集完成通知
+        TaskScheduler->>TaskScheduler: 切换状态为聚合
+        TaskScheduler->>Aggregation: 通知开始聚合
+        Aggregation->>Aggregation: 聚合数据
+        Aggregation->>TaskScheduler: 聚合完成通知
+        TaskScheduler->>TaskScheduler: 切换状态为诊断
+        TaskScheduler->>Diagnostic: 通知开始诊断
         Diagnostic->>Diagnostic: 分析诊断
-        Diagnostic->>DB: 写入诊断结果
+        Diagnostic->>TaskScheduler: 诊断完成通知
+        TaskScheduler->>TaskScheduler: 切换状态为完成
+        TaskScheduler->>TaskScheduler: 销毁任务
     end
-
-    Note over Containerd,DB: 容器停止流程
-    Containerd->>NRI: StopContainer事件
-    NRI->>PolicyEngine: 推送事件
-    PolicyEngine->>Collector: 停止采集(gRPC)
-    PolicyEngine->>Aggregation: 完成聚合任务
-    Aggregation->>Aggregation: 生成最终审计
-    Aggregation->>Diagnostic: 通知诊断
 ```
 
 ## 3. 策略引擎内部架构
@@ -123,8 +120,17 @@ graph TB
         PolicyReceiver[PolicyReceiver<br/>策略接收器]
         PolicyManager[PolicyManager<br/>策略管理器]
         PolicyMatcher[PolicyMatcher<br/>策略匹配器]
-        PolicyTaskManager[PolicyTaskManager<br/>任务管理器]
-        PolicyNotifier[PolicyNotifier<br/>策略通知器]
+    end
+
+    subgraph "任务调度模块 TaskScheduler"
+        TaskScheduler[TaskScheduler<br/>统一调度管理模块<br/>状态机:采集→聚合→诊断→完成/失败]
+        TaskStore[(TaskStore<br/>任务持久化)]
+    end
+
+    subgraph "状态机执行模块"
+        Collector[Collector<br/>采集状态执行模块]
+        AggregationEngine[AggregationEngine<br/>聚合状态执行模块]
+        DiagnosticEngine[DiagnosticEngine<br/>诊断状态执行模块]
     end
 
     subgraph "外部输入"
@@ -135,8 +141,6 @@ graph TB
     end
 
     subgraph "外部输出"
-        Collector[Collector]
-        AggregationEngine[AggregationEngine]
         PolicyDB[(PolicyDB)]
     end
 
@@ -149,12 +153,25 @@ graph TB
     %% 策略引擎内部
     PolicyReceiver --> PolicyManager
     PolicyManager --> PolicyDB
-    PolicyMatcher --> PolicyTaskManager
-    PolicyTaskManager --> PolicyNotifier
 
-    %% 策略引擎到外部输出
-    PolicyNotifier -->|gRPC| Collector
-    PolicyNotifier -->|内部RPC| AggregationEngine
+    %% 策略引擎到TaskScheduler
+    PolicyMatcher -->|匹配成功<br/>通知创建任务| TaskScheduler
+
+    %% TaskScheduler内部
+    TaskScheduler --> TaskStore
+
+    %% TaskScheduler调度各个执行模块
+    TaskScheduler -->|采集状态| Collector
+    TaskScheduler -->|聚合状态| AggregationEngine
+    TaskScheduler -->|诊断状态| DiagnosticEngine
+
+    %% 执行模块反馈给TaskScheduler
+    Collector -->|采集完成| TaskScheduler
+    Collector -->|采集失败| TaskScheduler
+    AggregationEngine -->|聚合完成| TaskScheduler
+    AggregationEngine -->|聚合失败| TaskScheduler
+    DiagnosticEngine -->|诊断完成| TaskScheduler
+    DiagnosticEngine -->|诊断失败| TaskScheduler
 
 ```
 
@@ -162,53 +179,44 @@ graph TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Idle: 策略创建
+    [*] --> 采集: 事件命中策略<br/>创建任务
 
-    Idle --> Pending: NRI事件匹配成功<br/>(Sync/Pod启动/容器启动)
+    采集 --> 聚合: 采集器通知采集完成
+    采集 --> 失败: 采集器通知采集失败
 
-    Pending --> Running: 启动成功
+    聚合 --> 诊断: 聚合引擎通知聚合完成
+    聚合 --> 失败: 聚合引擎通知聚合失败
 
-    Running --> Completed: 时长到期
-    Running --> Stopped: 容器停止
-    Running --> Failed: 启动失败/异常
+    诊断 --> 完成: 诊断引擎通知诊断完成
+    诊断 --> 失败: 诊断引擎通知诊断失败
 
-    Pending --> Failed: 采集器启动失败
-    Pending --> Failed: 聚合引擎启动失败
+    完成 --> [*]: 销毁任务
+    失败 --> [*]: 销毁任务
 
-    Stopped --> Pending: 容器重启<br/>(可选)
-
-    Completed --> [*]
-    Stopped --> [*]
-    Failed --> [*]
-
-    note right of Idle
-        空闲状态
-        策略已创建，等待匹配
+    note right of 采集
+        采集状态
+        通知采集器开始采集数据
     end note
 
-    note right of Pending
-        等待状态
-        匹配成功，等待启动
+    note right of 聚合
+        聚合状态
+        通知聚合引擎开始聚合数据
     end note
 
-    note right of Running
-        运行中
-        采集中
+    note right of 诊断
+        诊断状态
+        通知诊断引擎开始分析数据
     end note
 
-    note right of Completed
-        已完成
-        采集时长到期
+    note right of 完成
+        完成状态
+        销毁任务，清理资源
     end note
 
-    note right of Stopped
-        已停止
-        pod/容器停止
-    end note
-
-    note right of Failed
-        失败
-        采集器或聚合引擎失败
+    note right of 失败
+        失败状态
+        记录失败原因
+        销毁任务，清理资源
     end note
 ```
 

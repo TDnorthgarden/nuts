@@ -51,23 +51,35 @@
 - PolicyReceiver：接收策略（CLI/Sidecar/AI Agent）
 - PolicyManager：管理策略生命周期（存储、查询）
 - PolicyMatcher：匹配pod/容器是否符合策略（DataSource调用）
-- PolicyNotifier：通知采集器启动/停止，通知聚合引擎开启/关闭定时任务（PolicyMatcher调用）
-- PolicyTaskManager：管理策略任务状态机（新增）
+- 匹配成功后通知TaskScheduler创建任务
+
+#### 3. TaskScheduler（任务调度模块）
+- 任务调度器，管理任务状态机（采集→聚合→诊断→完成）
+- 任务持久化
+- 状态转换管理
+- 与各执行模块交互，调度状态流转
 
 **逻辑流程**：
 1. DataSource接收NRI事件（容器创建/启动/停止等）
 2. DataSource调用PolicyEngine的PolicyMatcher进行匹配
 3. 如果匹配成功：
-   - PolicyMatcher调用PolicyTaskManager创建或更新任务
-   - 根据任务状态，PolicyTaskManager调用PolicyNotifier
-   - PolicyNotifier通过gRPC客户端调用Collector服务启动采集
-   - PolicyNotifier通知AggregationEngine开启聚合任务（通过内部RPC）
-4. 如果容器停止或策略过期：
-   - PolicyTaskManager更新任务状态
-   - PolicyNotifier通过gRPC客户端调用Collector服务停止采集
-   - PolicyNotifier通知AggregationEngine停止/完成聚合任务
+   - PolicyMatcher通知TaskScheduler创建任务
+   - TaskScheduler创建任务，初始状态为"采集"
+   - TaskScheduler通知采集器模块开始采集数据
+4. 采集器采集完成后通知TaskScheduler
+   - TaskScheduler将任务状态切换为"聚合"
+   - TaskScheduler通知聚合引擎开始聚合数据
+5. 聚合引擎聚合完成后通知TaskScheduler
+   - TaskScheduler将任务状态切换为"诊断"
+   - TaskScheduler通知诊断引擎开始分析数据
+6. 诊断引擎诊断完成后通知TaskScheduler
+   - TaskScheduler将任务状态切换为"完成"
+   - TaskScheduler销毁任务，清理资源
+7. 如果任何状态出现异常：
+   - TaskScheduler将任务状态切换为失败
+   - TaskScheduler销毁任务，清理资源
 
-#### 3. Collector（采集器）
+#### 4. Collector（采集器）
 - 核心库设计：pkg/collector/作为可复用库
 - 具体采集器：
   - 进程采集器（ProcessCollector）
@@ -78,9 +90,9 @@
 - 脚本管理器（ScriptManager）
 - gRPC服务端：提供采集控制接口
 - 作为独立进程运行，通过gRPC接收service的采集请求
+- 注：采集器是TaskScheduler状态机中的"采集"状态的执行模块
 
-#### 4. AggregationEngine（聚合引擎）
-- 任务调度器（TaskScheduler）
+#### 5. AggregationEngine（聚合引擎）
 - 事件聚合器（EventAggregator）
 - 聚合算法抽象（AggregationAlgorithm）
   - 简单去重聚合算法（SimpleAggregationAlgorithm）
@@ -89,9 +101,9 @@
   - 频率聚合算法（FrequencyAggregationAlgorithm）
   - 自定义聚合算法（CustomAggregationAlgorithm）
 - 审计生成器（AuditGenerator）
-- 诊断通知器（DiagnosticNotifier）
+- 注：聚合引擎是TaskScheduler状态机中的"聚合"状态的执行模块
 
-#### 5. DiagnosticEngine（诊断引擎）
+#### 6. DiagnosticEngine（诊断引擎）
 - 审计分析器（AuditAnalyzer）
 - 诊断策略抽象（DiagnosticStrategy）
   - 内置诊断策略（BuiltInDiagnosticStrategy）：基于规则引擎
@@ -99,6 +111,7 @@
 - 瓶颈检测器（BottleneckDetector）
 - 报告生成器（ReportGenerator）
 - AI Agent接口（AIAgentInterface，第三阶段）
+- 注：诊断引擎是TaskScheduler状态机中的"诊断"状态的执行模块
 
 **诊断流程**：
 1. 接收聚合引擎的通知（审计数据）
@@ -573,173 +586,268 @@ nuts/
 
 ### 策略任务状态机
 
-为了管理每个采集任务的生命周期，策略引擎需要为每个策略任务建立一个状态机。
+为了管理每个采集任务的生命周期，策略引擎需要为每个策略任务建立一个状态机。nuts-service实现一个总的调度逻辑，当事件和策略命中之后生成一个任务，该任务使用状态机来维持运转状态。
 
 ### 状态定义
 
 | 状态 | 说明 | 进入条件 | 退出条件 |
 |-----|------|---------|---------|
-| Idle | 空闲：策略已创建，等待匹配 | 策略创建 | 匹配成功（NRI事件） |
-| Pending | 等待：匹配成功，等待启动 | NRI事件匹配成功 | 启动成功 |
-| Running | 运行中：采集中 | 采集器启动成功 | 时长到期 或 容器停止 |
-| Completed | 已完成：采集时长到期 | 时长到期 | - |
-| Stopped | 已停止：pod/容器停止 | 容器停止事件 | - |
-| Failed | 失败：采集器或聚合引擎失败 | 启动失败或运行异常 | - |
+| 采集 | 采集状态：正在采集数据 | 事件命中策略，创建任务 | 采集器完成数据采集 或 异常 |
+| 聚合 | 聚合状态：正在聚合数据 | 采集器通知采集完成 | 聚合引擎完成聚合 或 异常 |
+| 诊断 | 诊断状态：正在诊断分析 | 聚合引擎通知聚合完成 | 诊断引擎完成诊断 或 异常 |
+| 完成 | 完成状态：任务完成 | 诊断引擎通知诊断完成 | 销毁任务 |
+| 失败 | 失败状态：任务失败 | 任何状态出现异常 | 销毁任务 |
 
 ### 状态转换图
 
 ```
-                    NRI事件匹配成功
-    +--------+      (Sync/Pod启动/容器启动)
-    |  Idle  | --------------------------> +---------+
-    +--------+                             | Pending |
-                                           +---------+
-                                                |
-                                                | 启动成功
-                                                v
-                                          +---------+
-                                          | Running |
-                                          +---------+
-                                                |
-                    +---------------------------+---------------------------+
-                    |                           |                           |
-                    | 时长到期                   | 容器停止                   | 启动失败/异常
-                    v                           v                           v
-              +-----------+               +---------+                 +---------+
-              | Completed |               | Stopped |                 | Failed  |
-              +-----------+               +---------+                 +---------+
+    事件命中策略
+        |
+        v
+    +-------+
+    | 采集  | ------------------------> +-------+
+    +-------+  采集完成通知              | 聚合  |
+        |                             +-------+
+        |  聚合完成通知                      |
+        v                                  |
+    +-------+  诊断完成通知              +-------+
+    | 诊断  | ------------------------> | 完成  |
+    +-------+                          +-------+
+        |                                  |
+        |  异常                             |
+        v                                  v
+    +-------+                          销毁任务
+    | 失败  |
+    +-------+
+        |
+        v
+    销毁任务
 ```
 
-### NRI事件与状态转换关系
+### 状态流转机制
 
-| NRI事件 | 当前状态 | 目标状态 | 触发动作 |
-|---------|---------|---------|---------|
-| Sync/Pod启动/容器启动 | Idle | Pending | 创建任务，通知采集器启动 |
-| Sync/Pod启动/容器启动 | Running | Running | 更新任务时间（如果需要） |
-| Pod停止/容器停止 | Running | Stopped | 通知采集器停止，通知聚合引擎完成 |
-| Pod停止/容器停止 | Pending | Stopped | 取消任务启动 |
-| Sync/Pod启动/容器启动 | Stopped | Pending | 重新启动（可选，根据策略配置） |
-| 时长到期 | Running | Completed | 通知采集器停止，通知聚合引擎完成 |
-| 采集器启动失败 | Pending | Failed | 记录失败原因，重试或告警 |
-| 聚合引擎启动失败 | Pending | Failed | 记录失败原因，重试或告警 |
+#### 1. 采集状态
+- **触发条件**：NRI事件命中策略，TaskScheduler创建任务
+- **执行动作**：
+  - 通知采集器模块开始采集数据
+  - 当前阶段：采集器暂未实现，输出日志即可
+- **状态转换**：
+  - 正常：采集器收集完数据后通知TaskScheduler，切换到聚合状态
+  - 异常：采集器通知TaskScheduler异常，切换到失败状态
+
+#### 2. 聚合状态
+- **触发条件**：采集器通知采集完成
+- **执行动作**：
+  - 开启数据聚合
+  - 聚合引擎开始聚合数据
+  - 当前阶段：聚合引擎暂未实现，输出日志即可
+- **状态转换**：
+  - 正常：聚合完成后通知TaskScheduler，切换到诊断状态
+  - 异常：聚合引擎通知TaskScheduler异常，切换到失败状态
+
+#### 3. 诊断状态
+- **触发条件**：聚合引擎通知聚合完成
+- **执行动作**：
+  - 诊断引擎开始分析数据
+  - 当前阶段：诊断引擎暂未实现，输出日志即可
+- **状态转换**：
+  - 正常：诊断完成后通知TaskScheduler，切换到完成状态
+  - 异常：诊断引擎通知TaskScheduler异常，切换到失败状态
+
+#### 4. 完成状态
+- **触发条件**：诊断引擎通知诊断完成
+- **执行动作**：
+  - 销毁任务
+  - 清理相关资源
+- **状态转换**：任务生命周期结束
+
+#### 5. 失败状态
+- **触发条件**：任何状态出现异常（采集/聚合/诊断失败）
+- **执行动作**：
+  - 记录失败原因
+  - 销毁任务
+  - 清理相关资源
+- **状态转换**：任务生命周期结束
 
 ### 状态机实现逻辑
 
 ```go
-// PolicyTaskManagerImpl 策略任务管理器实现
-type PolicyTaskManagerImpl struct {
-    tasks      map[string]*Task           // 任务缓存
-    taskStore  TaskStore                  // 任务持久化
-    notifier   PolicyNotifier             // 策略通知器
+// TaskState 任务状态
+type TaskState int
+
+const (
+    TaskStateCollecting TaskState = iota // 采集状态
+    TaskStateAggregating                 // 聚合状态
+    TaskStateDiagnosing                  // 诊断状态
+    TaskStateCompleted                   // 完成状态
+    TaskStateFailed                      // 失败状态
+)
+
+// Task 任务
+type Task struct {
+    ID              string        // 任务ID
+    PolicyID        string        // 策略ID
+    CgroupID        string        // cgroup ID
+    State           TaskState     // 任务状态
+    Metrics         []string      // 采集指标
+    StartTime       time.Time     // 开始时间
+    EndTime         time.Time     // 结束时间
+    CreatedAt       time.Time     // 创建时间
+    UpdatedAt       time.Time     // 更新时间
+}
+
+// TaskScheduler 任务调度器（nuts-service的总调度逻辑）
+type TaskScheduler struct {
+    tasks      map[string]*Task
+    taskStore  TaskStore
+    collector  CollectorClient
+    aggregator AggregationClient
+    diagnostic DiagnosticClient
     mutex      sync.RWMutex
 }
 
-// HandleNRIEvent 处理NRI事件
-func (m *PolicyTaskManagerImpl) HandleNRIEvent(event *Event) error {
-    m.mutex.Lock()
-    defer m.mutex.Unlock()
+// HandlePolicyMatch 处理策略匹配命中
+func (s *TaskScheduler) HandlePolicyMatch(event *Event, policy *Policy) error {
+    s.mutex.Lock()
+    defer s.mutex.Unlock()
 
-    // 1. 匹配策略
-    matchResult, err := m.matcher.Match(event)
-    if err != nil {
-        return err
-    }
-
-    // 2. 查找现有任务
-    existingTask, err := m.taskStore.GetByCgroupAndPolicy(event.CgroupID, matchResult.PolicyID)
-    if err != nil && err != ErrTaskNotFound {
-        return err
-    }
-
-    // 3. 根据事件类型和当前状态进行状态转换
-    switch event.Type {
-    case NRISync, NRIPodStart, NRIContainerStart:
-        if existingTask == nil {
-            // 创建新任务
-            return m.createNewTask(matchResult, event)
-        } else {
-            // 更新现有任务
-            return m.updateExistingTask(existingTask, event)
-        }
-    case NRIPodStop, NRIContainerStop:
-        if existingTask != nil && existingTask.State == TaskStateRunning {
-            // 停止任务
-            return m.stopTask(existingTask, event)
-        }
-    }
-
-    return nil
-}
-
-// createNewTask 创建新任务
-func (m *PolicyTaskManagerImpl) createNewTask(matchResult *MatchResult, event *Event) error {
+    // 创建任务，初始状态为采集
     task := &Task{
         ID:        generateTaskID(),
-        PolicyID:  matchResult.PolicyID,
+        PolicyID:  policy.ID,
         CgroupID:  event.CgroupID,
-        State:     TaskStatePending,
-        Metrics:   matchResult.Metrics,
-        Duration:  matchResult.Duration,
+        State:     TaskStateCollecting,
+        Metrics:   policy.Metrics,
+        StartTime: time.Now(),
         CreatedAt: time.Now(),
         UpdatedAt: time.Now(),
     }
 
     // 持久化任务
-    if err := m.taskStore.Create(task); err != nil {
+    if err := s.taskStore.Create(task); err != nil {
         return err
     }
 
-    // 通知采集器启动
-    if err := m.notifier.NotifyCollectorStart(task.CgroupID, task.PolicyID, task.Metrics); err != nil {
-        m.updateTaskState(task.ID, TaskStateFailed, err.Error())
-        return err
-    }
+    // 通知采集器开始采集
+    log.Printf("Task %s: Start collecting data for cgroup %s", task.ID, task.CgroupID)
+    // TODO: 调用采集器接口
+    // if err := s.collector.StartCollection(task.CgroupID, task.PolicyID, task.Metrics); err != nil {
+    //     return err
+    // }
 
-    // 通知聚合引擎启动
-    if err := m.notifier.NotifyAggregationStart(task.CgroupID, task.PolicyID, task.Duration); err != nil {
-        m.updateTaskState(task.ID, TaskStateFailed, err.Error())
-        return err
-    }
-
-    // 更新状态为Running
-    return m.updateTaskState(task.ID, TaskStateRunning, "")
+    return nil
 }
 
-// stopTask 停止任务
-func (m *PolicyTaskManagerImpl) stopTask(task *Task, event *Event) error {
-    // 通知采集器停止
-    if err := m.notifier.NotifyCollectorStop(task.CgroupID, task.PolicyID); err != nil {
-        log.Printf("Failed to notify collector stop: %v", err)
-    }
+// HandleCollectionComplete 处理采集完成通知
+func (s *TaskScheduler) HandleCollectionComplete(taskID string) error {
+    s.mutex.Lock()
+    defer s.mutex.Unlock()
 
-    // 通知聚合引擎停止
-    if err := m.notifier.NotifyAggregationStop(task.CgroupID, task.PolicyID); err != nil {
-        log.Printf("Failed to notify aggregation stop: %v", err)
-    }
-
-    // 更新状态为Stopped
-    return m.updateTaskState(task.ID, TaskStateStopped, "Container stopped")
-}
-
-// checkTaskExpiration 检查任务过期（定时任务）
-func (m *PolicyTaskManagerImpl) checkTaskExpiration() {
-    m.mutex.Lock()
-    defer m.mutex.Unlock()
-
-    runningTasks, err := m.taskStore.GetByState(TaskStateRunning)
+    task, err := s.taskStore.Get(taskID)
     if err != nil {
-        log.Printf("Failed to get running tasks: %v", err)
-        return
+        return err
     }
 
-    now := time.Now()
-    for _, task := range runningTasks {
-        if now.Sub(task.StartTime) >= task.Duration {
-            // 任务时长到期
-            m.stopTask(task, nil)
-            m.updateTaskState(task.ID, TaskStateCompleted, "Duration expired")
-        }
+    // 切换状态为聚合
+    task.State = TaskStateAggregating
+    task.UpdatedAt = time.Now()
+    if err := s.taskStore.Update(task); err != nil {
+        return err
     }
+
+    // 通知聚合引擎开始聚合
+    log.Printf("Task %s: Start aggregating data", task.ID)
+    // TODO: 调用聚合引擎接口
+    // if err := s.aggregator.StartAggregation(taskID); err != nil {
+    //     return err
+    // }
+
+    return nil
+}
+
+// HandleAggregationComplete 处理聚合完成通知
+func (s *TaskScheduler) HandleAggregationComplete(taskID string) error {
+    s.mutex.Lock()
+    defer s.mutex.Unlock()
+
+    task, err := s.taskStore.Get(taskID)
+    if err != nil {
+        return err
+    }
+
+    // 切换状态为诊断
+    task.State = TaskStateDiagnosing
+    task.UpdatedAt = time.Now()
+    if err := s.taskStore.Update(task); err != nil {
+        return err
+    }
+
+    // 通知诊断引擎开始诊断
+    log.Printf("Task %s: Start diagnosing data", task.ID)
+    // TODO: 调用诊断引擎接口
+    // if err := s.diagnostic.StartDiagnosis(taskID); err != nil {
+    //     return err
+    // }
+
+    return nil
+}
+
+// HandleDiagnosisComplete 处理诊断完成通知
+func (s *TaskScheduler) HandleDiagnosisComplete(taskID string) error {
+    s.mutex.Lock()
+    defer s.mutex.Unlock()
+
+    task, err := s.taskStore.Get(taskID)
+    if err != nil {
+        return err
+    }
+
+    // 切换状态为完成
+    task.State = TaskStateCompleted
+    task.EndTime = time.Now()
+    task.UpdatedAt = time.Now()
+    if err := s.taskStore.Update(task); err != nil {
+        return err
+    }
+
+    log.Printf("Task %s: Task completed, destroying task", task.ID)
+
+    // 销毁任务
+    if err := s.taskStore.Delete(taskID); err != nil {
+        return err
+    }
+
+    delete(s.tasks, taskID)
+    return nil
+}
+
+// HandleTaskFailure 处理任务失败
+func (s *TaskScheduler) HandleTaskFailure(taskID string, reason string) error {
+    s.mutex.Lock()
+    defer s.mutex.Unlock()
+
+    task, err := s.taskStore.Get(taskID)
+    if err != nil {
+        return err
+    }
+
+    // 切换状态为失败
+    task.State = TaskStateFailed
+    task.EndTime = time.Now()
+    task.UpdatedAt = time.Now()
+    if err := s.taskStore.Update(task); err != nil {
+        return err
+    }
+
+    log.Printf("Task %s: Task failed, reason: %s, destroying task", task.ID, reason)
+
+    // 销毁任务
+    if err := s.taskStore.Delete(taskID); err != nil {
+        return err
+    }
+
+    delete(s.tasks, taskID)
+    return nil
 }
 ```
 
@@ -751,22 +859,9 @@ type TaskStore interface {
     Create(task *Task) error
     Update(task *Task) error
     Get(id string) (*Task, error)
-    GetByCgroupAndPolicy(cgroupID, policyID string) (*Task, error)
-    GetByState(state TaskState) ([]*Task, error)
     Delete(id string) error
 }
 ```
-
-### 时长到期检测
-
-- 使用定时器定期检查运行中的任务是否到期
-- 检查频率：每1分钟检查一次
-- 到期条件：`当前时间 - 任务开始时间 >= 策略配置的采集时长`
-
-### 容器重启处理
-
-- 如果策略配置允许容器重启后重新采集，当检测到容器重启时，可以将状态从Stopped转换到Pending
-- 默认情况下，容器停止后任务不再重启
 
 ## 诊断引擎实现逻辑
 

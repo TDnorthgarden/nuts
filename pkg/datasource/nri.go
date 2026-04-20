@@ -87,8 +87,8 @@ func (d *NRIDataSource) Start() error {
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 
 	// Create NRI stub with plugin index (must be 2 digits)
-	//stub, err := stub.New(d, stub.WithPluginIdx("01"), stub.WithPluginName("nuts"))
-	stub, err := stub.New(d)
+	stub, err := stub.New(d, stub.WithPluginIdx("01"), stub.WithPluginName("nuts"))
+	//stub, err := stub.New(d)
 	if err != nil {
 		return fmt.Errorf("failed to create NRI stub: %w", err)
 	}
