@@ -12,8 +12,12 @@ type State string
 const (
 	// StateCreated is the initial state when a task is created
 	StateCreated State = "created"
-	// StateRunning is when the task is running (collecting, aggregating, analyzing, reporting)
-	StateRunning State = "running"
+	// StateCollecting is when the task is collecting data
+	StateCollecting State = "collecting"
+	// StateAggregating is when the task is aggregating data
+	StateAggregating State = "aggregating"
+	// StateDiagnosing is when the task is diagnosing
+	StateDiagnosing State = "diagnosing"
 	// StateStopped is when the task is stopped
 	StateStopped State = "stopped"
 	// StateCompleted is when the task completed successfully
@@ -24,11 +28,19 @@ const (
 
 // ValidTransitions defines valid state transitions
 var ValidTransitions = map[State][]State{
-	StateCreated:   {StateRunning, StateFailed},
-	StateRunning:   {StateStopped, StateFailed},
-	StateStopped:   {StateRunning, StateFailed},
-	StateCompleted: {}, // Terminal state
-	StateFailed:    {}, // Terminal state
+	// Created -> Collecting: pod/container start event matched
+	StateCreated: {StateCollecting, StateFailed},
+	// Collecting -> Aggregating: collection completed
+	StateCollecting: {StateAggregating, StateStopped, StateFailed},
+	// Aggregating -> Diagnosing: aggregation completed
+	StateAggregating: {StateDiagnosing, StateStopped, StateFailed},
+	// Diagnosing -> Completed: diagnosis completed
+	StateDiagnosing: {StateCompleted, StateStopped, StateFailed},
+	// Stopped -> Collecting: restart (optional)
+	StateStopped: {StateCollecting, StateFailed},
+	// Terminal states
+	StateCompleted: {},
+	StateFailed:    {},
 }
 
 // StateMachine manages state transitions for policy tasks

@@ -6,29 +6,28 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nuts-project/nuts/pkg/aggregation/algorithm"
 	"github.com/nuts-project/nuts/pkg/storage"
 )
 
-// EventAggregator aggregates events using specified algorithm
-type EventAggregator struct {
-	algorithm  algorithm.AggregationAlgorithm
+// EventAggregatorImpl aggregates events using specified algorithm
+type EventAggregatorImpl struct {
+	algorithm  AggregationAlgorithm
 	eventStore storage.EventStore
 	auditStore storage.AuditStore
 	mu         sync.RWMutex
 }
 
 // NewEventAggregator creates a new event aggregator
-func NewEventAggregator(eventStore storage.EventStore, auditStore storage.AuditStore) *EventAggregator {
-	return &EventAggregator{
-		algorithm:  algorithm.NewSimpleAggregationAlgorithm(),
+func NewEventAggregator(eventStore storage.EventStore, auditStore storage.AuditStore) *EventAggregatorImpl {
+	return &EventAggregatorImpl{
+		algorithm:  NewSimpleAggregationAlgorithm(),
 		eventStore: eventStore,
 		auditStore: auditStore,
 	}
 }
 
 // SetAlgorithm sets the aggregation algorithm
-func (a *EventAggregator) SetAlgorithm(algo algorithm.AggregationAlgorithm) error {
+func (a *EventAggregatorImpl) SetAlgorithm(algo AggregationAlgorithm) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.algorithm = algo
@@ -36,7 +35,7 @@ func (a *EventAggregator) SetAlgorithm(algo algorithm.AggregationAlgorithm) erro
 }
 
 // Aggregate aggregates events for a given cgroup and policy
-func (a *EventAggregator) Aggregate(cgroupID, policyID string) (*AggregatedEvent, error) {
+func (a *EventAggregatorImpl) Aggregate(cgroupID, policyID string) (*AggregatedEvent, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
@@ -65,7 +64,7 @@ func (a *EventAggregator) Aggregate(cgroupID, policyID string) (*AggregatedEvent
 }
 
 // AggregateByTimeRange aggregates events within a time range
-func (a *EventAggregator) AggregateByTimeRange(cgroupID, policyID string, start, end time.Time) (*AggregatedEvent, error) {
+func (a *EventAggregatorImpl) AggregateByTimeRange(cgroupID, policyID string, start, end time.Time) (*AggregatedEvent, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
@@ -92,7 +91,7 @@ func (a *EventAggregator) AggregateByTimeRange(cgroupID, policyID string, start,
 }
 
 // AggregateAndSave aggregates events and saves the result to audit store
-func (a *EventAggregator) AggregateAndSave(cgroupID, policyID string) (*Audit, error) {
+func (a *EventAggregatorImpl) AggregateAndSave(cgroupID, policyID string) (*storage.Audit, error) {
 	// Aggregate events
 	aggregatedEvent, err := a.Aggregate(cgroupID, policyID)
 	if err != nil {
@@ -100,7 +99,7 @@ func (a *EventAggregator) AggregateAndSave(cgroupID, policyID string) (*Audit, e
 	}
 
 	// Create audit record
-	audit := &Audit{
+	audit := &storage.Audit{
 		ID:             generateAuditID(cgroupID, policyID, aggregatedEvent.StartTime),
 		PolicyID:       policyID,
 		CgroupID:       cgroupID,
@@ -121,7 +120,7 @@ func (a *EventAggregator) AggregateAndSave(cgroupID, policyID string) (*Audit, e
 }
 
 // UpdateAudit updates an existing audit record with new aggregated data
-func (a *EventAggregator) UpdateAudit(auditID string) (*Audit, error) {
+func (a *EventAggregatorImpl) UpdateAudit(auditID string) (*storage.Audit, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
