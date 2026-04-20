@@ -1,0 +1,7 @@
+- rule: test rule 
+  desc: Detect test containers
+  condition: pod_name startswith "manual"
+  output: "find container detected: {{container.name}}"
+  priority: high
+  tags: ["security", "privileged"]
+  enabled: true

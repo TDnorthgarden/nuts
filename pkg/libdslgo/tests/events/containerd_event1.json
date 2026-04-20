@@ -1,0 +1,108 @@
+{
+  "pod.name": "nginx-deployment-12345",
+  "pod.namespace": "default",
+  "pod.uid": "8f3b5c7d-1e2a-3f4g-5h6i-7j8k9l0m1n2o",
+  "pod.labels": {
+    "app": "nginx",
+    "environment": "production",
+    "version": "1.0"
+  },
+  "pod.annotations": {
+    "prometheus.io/scrape": "true",
+    "prometheus.io/port": "80"
+  },
+  "container.name": "nginx",
+  "container.id": "containerd://abc123def456",
+  "container.image": "registry.k8s.io/nginx:latest",
+  "container.image.repository": "registry.k8s.io/nginx",
+  "container.image.tag": "latest",
+  "container.state": "running",
+  "container.status": "running",
+  "container.exit_code": 0,
+  "container.created_at": 1640995200000000000,
+  "container.started_at": 1640995260000000000,
+  "container.finished_at": 0,
+  "container.pid": 12345,
+  "container.ip": "10.244.1.5",
+  "container.restart_count": 0,
+  "container.health_status": "healthy",
+  "container.runtime": "io.containerd.runc.v2",
+  "container.privileged": false,
+  "container.host_network": false,
+  "container.host_pid": false,
+  "container.host_ipc": false,
+  "task.id": "task-abc123",
+  "task.pid": 12345,
+  "task.state": "running",
+  "task.exit_status": 0,
+  "task.start_time": 1640995260000000000,
+  "task.end_time": 0,
+  "process.pid": 12346,
+  "process.exec_id": "exec-xyz789",
+  "process.name": "nginx",
+  "process.args": ["nginx", "-g", "daemon off;"],
+  "process.cwd": "/",
+  "process.env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "NGINX_VERSION=1.21.0"],
+  "process.user": {
+    "uid": 0,
+    "gid": 0,
+    "username": "root",
+    "groups": [0, 1]
+  },
+  "process.oom_score_adj": 0,
+  "process.io": {
+    "stdin": "/dev/null",
+    "stdout": "/var/log/nginx/access.log",
+    "stderr": "/var/log/nginx/error.log"
+  },
+  "process.terminal": false,
+  "process.cli": "nginx -g daemon off;",
+  "process.no_new_privileges": true,
+  "process.apparmor_profile": "docker-default",
+  "process.selinux_label": "system_u:system_r:container_t:s0:c123,c456",
+  "process.capabilities": {
+    "add": ["CAP_NET_BIND_SERVICE"],
+    "drop": ["CAP_SYS_ADMIN"]
+  },
+  "linux.namespaces": {
+    "type": "pid",
+    "path": "/proc/12345/ns/pid"
+  },
+  "linux.resources": {
+    "memory": {
+      "limit": 536870912,
+      "reservation": 268435456
+    },
+    "cpu": {
+      "limit": 1000,
+      "shares": 512
+    }
+  },
+  "linux.devices": [],
+  "linux.mounts": [
+    {
+      "destination": "/host",
+      "type": "bind",
+      "source": "/var/lib/docker"
+    }
+  ],
+  "linux.seccomp_profile": "docker-default",
+  "linux.rootfs": {
+    "type": "overlayfs"
+  },
+  "linux.masked_paths": [
+    "/proc/asound",
+    "/proc/acpi"
+  ],
+  "linux.readonly_paths": [
+    "/usr/lib/systemd/system"
+  ],
+  "linux.intel_rdt": {},
+  "linux.sysctl": {
+    "net.ipv4.ip_forward": "1"
+  },
+  "linux.cgroup_path": "/kubepods/burstable/pod12345/12345",
+  "linux.security_context": {
+    "disable": false
+  }
+}

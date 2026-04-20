@@ -1,0 +1,7 @@
+- rule: container.privileged = true and container.image contains "nginx"
+  desc: Detect privileged nginx containers
+  condition: container.name startswith "manual" 
+  output: "Privileged nginx container detected: {{container.name}}"
+  priority: high
+  tags: ["security", "privileged", "nginx"]
+  enabled: true

@@ -1,0 +1,91 @@
+{
+  "pod.name": "kube-apiserver-master",
+  "pod.namespace": "kube-system",
+  "pod.uid": "1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p",
+  "pod.labels": {
+    "component": "kube-apiserver",
+    "tier": "control-plane"
+  },
+  "pod.annotations": {},
+  "container.name": "kube-apiserver",
+  "container.id": "containerd://sys789xyz012",
+  "container.image": "registry.k8s.io/kube-apiserver:v1.23.0",
+  "container.image.repository": "registry.k8s.io/kube-apiserver",
+  "container.image.tag": "v1.23.0",
+  "container.state": "running",
+  "container.status": "running",
+  "container.exit_code": 0,
+  "container.created_at": 1640995000000000000,
+  "container.started_at": 1640995100000000000,
+  "container.finished_at": 0,
+  "container.pid": 34567,
+  "container.ip": "10.96.0.1",
+  "container.restart_count": 0,
+  "container.health_status": "healthy",
+  "container.runtime": "io.containerd.runc.v2",
+  "container.privileged": false,
+  "container.host_network": true,
+  "container.host_pid": false,
+  "container.host_ipc": false,
+  "task.id": "task-sys789",
+  "task.pid": 34567,
+  "task.state": "running",
+  "task.exit_status": 0,
+  "task.start_time": 1640995100000000000,
+  "task.end_time": 0,
+  "process.pid": 34568,
+  "process.exec_id": "exec-sys123",
+  "process.name": "kube-apiserver",
+  "process.args": ["kube-apiserver", "--advertise-address=0.0.0.0", "--secure-port=6443"],
+  "process.cwd": "/",
+  "process.env": ["PATH=/usr/local/bin:/usr/bin:/bin", "KUBE_VERSION=1.23.0"],
+  "process.user": {
+    "uid": 0,
+    "gid": 0,
+    "username": "root",
+    "groups": [0]
+  },
+  "process.oom_score_adj": -1000,
+  "process.io": {
+    "stdin": "/dev/null",
+    "stdout": "/var/log/kube-apiserver/audit.log",
+    "stderr": "/var/log/kube-apiserver/error.log"
+  },
+  "process.terminal": false,
+  "process.cli": "kube-apiserver --advertise-address=0.0.0.0 --secure-port=6443",
+  "process.no_new_privileges": true,
+  "process.apparmor_profile": "",
+  "process.selinux_label": "",
+  "process.capabilities": {
+    "add": ["CAP_NET_BIND_SERVICE", "CAP_NET_RAW"],
+    "drop": []
+  },
+  "linux.namespaces": {
+    "type": "pid",
+    "path": "/proc/34567/ns/pid"
+  },
+  "linux.resources": {
+    "memory": {
+      "limit": 1073741824,
+      "reservation": 536870912
+    },
+    "cpu": {
+      "limit": 2000,
+      "shares": 1024
+    }
+  },
+  "linux.devices": [],
+  "linux.mounts": [],
+  "linux.seccomp_profile": "",
+  "linux.rootfs": {
+    "type": "overlayfs"
+  },
+  "linux.masked_paths": [],
+  "linux.readonly_paths": [],
+  "linux.intel_rdt": {},
+  "linux.sysctl": {},
+  "linux.cgroup_path": "/kubepods/besteffort/pod34567/34567",
+  "linux.security_context": {
+    "disable": false
+  }
+}

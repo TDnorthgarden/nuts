@@ -1,0 +1,91 @@
+{
+  "pod.name": "redis-cache-67890",
+  "pod.namespace": "default",
+  "pod.uid": "9a4b6c8d-2e3f-4g5h-6i7j-8k9l0m1n2o3p",
+  "pod.labels": {
+    "app": "redis",
+    "env": "production"
+  },
+  "pod.annotations": {},
+  "container.name": "redis",
+  "container.id": "containerd://def456ghi789",
+  "container.image": "registry.k8s.io/redis:stable",
+  "container.image.repository": "registry.k8s.io/redis",
+  "container.image.tag": "stable",
+  "container.state": "running",
+  "container.status": "running",
+  "container.exit_code": 0,
+  "container.created_at": 1640995300000000000,
+  "container.started_at": 1640995360000000000,
+  "container.finished_at": 0,
+  "container.pid": 23456,
+  "container.ip": "10.244.2.6",
+  "container.restart_count": 2,
+  "container.health_status": "healthy",
+  "container.runtime": "io.containerd.runc.v2",
+  "container.privileged": false,
+  "container.host_network": false,
+  "container.host_pid": false,
+  "container.host_ipc": false,
+  "task.id": "task-def456",
+  "task.pid": 23456,
+  "task.state": "running",
+  "task.exit_status": 0,
+  "task.start_time": 1640995360000000000,
+  "task.end_time": 0,
+  "process.pid": 23457,
+  "process.exec_id": "exec-abc123",
+  "process.name": "redis-server",
+  "process.args": ["redis-server", "--appendonly", "yes"],
+  "process.cwd": "/data",
+  "process.env": ["PATH=/usr/local/bin:/usr/bin:/bin", "REDIS_VERSION=6.2.0"],
+  "process.user": {
+    "uid": 999,
+    "gid": 999,
+    "username": "redis",
+    "groups": [999]
+  },
+  "process.oom_score_adj": 0,
+  "process.io": {
+    "stdin": "/dev/null",
+    "stdout": "/var/log/redis/redis.log",
+    "stderr": "/var/log/redis/redis.log"
+  },
+  "process.terminal": false,
+  "process.cli": "redis-server --appendonly yes",
+  "process.no_new_privileges": true,
+  "process.apparmor_profile": "",
+  "process.selinux_label": "",
+  "process.capabilities": {
+    "add": [],
+    "drop": []
+  },
+  "linux.namespaces": {
+    "type": "pid",
+    "path": "/proc/23456/ns/pid"
+  },
+  "linux.resources": {
+    "memory": {
+      "limit": 268435456,
+      "reservation": 134217728
+    },
+    "cpu": {
+      "limit": 500,
+      "shares": 256
+    }
+  },
+  "linux.devices": [],
+  "linux.mounts": [],
+  "linux.seccomp_profile": "",
+  "linux.rootfs": {
+    "type": "overlayfs"
+  },
+  "linux.masked_paths": [],
+  "linux.readonly_paths": [],
+  "linux.intel_rdt": {},
+  "linux.sysctl": {},
+  "linux.cgroup_path": "/kubepods/burstable/pod67890/23456",
+  "linux.security_context": {
+    "disable": false
+  }
+}

@@ -1,0 +1,7 @@
+- rule: container.name stah "manual"
+  desc: Detect test containers
+  condition: container.name stah "manual"
+  output: "find container detected: {{container.name}}"
+  priority: high
+  tags: ["security", "privileged"]
+  enabled: true

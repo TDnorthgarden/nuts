@@ -1,0 +1,13 @@
+{
+  "id": "policy-1",
+  "name": "Monitor privileged containers",
+  "metrics": {
+    "process": [
+      "process.bt"
+    ],
+    "network": [
+      "network.bt"
+    ]
+  },
+  "duration": 60
+}

@@ -1,0 +1,15 @@
+# Collector Configuration
+
+# Server configuration
+server:
+  address: "0.0.0.0:50051"  # gRPC server listen address (independent mode)
+
+# BPF configuration
+bpf:
+  script_path: "/opt/nuts/scripts"  # BPF script path
+
+# Logging configuration
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json, text
+  output: "stdout"  # stdout, stderr, or file path

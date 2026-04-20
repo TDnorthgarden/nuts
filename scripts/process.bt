@@ -1,0 +1,21 @@
+#!/usr/bin/env bpftrace
+
+// Process collector BPF script
+// This script traces process events within a specific cgroup
+
+#include <linux/sched.h>
+
+// Trace process exec events
+tracepoint:syscalls:sys_enter_execve
+{
+    // Filter by cgroup (to be configured)
+    // @cgroup_filter[cgroup] = 1;
+    
+    printf("exec: pid=%d comm=%s\n", pid, comm);
+}
+
+// Trace process exit events
+tracepoint:sched:sched_process_exit
+{
+    printf("exit: pid=%d comm=%s\n", pid, comm);
+}

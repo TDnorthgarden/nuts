@@ -1,0 +1,18 @@
+{
+  "metadata": {
+    "name": "manual-verify-pod",
+    "namespace": "default",
+    "attempt": 1,
+    "uid": "manual-verify-pod-001"
+  },
+  "log_directory": "/tmp/crius-manual-logs",
+  "linux": {
+    "security_context": {
+      "namespace_options": {
+        "network": 0,
+        "pid": 0,
+        "ipc": 0
+      }
+    }
+  }
+}

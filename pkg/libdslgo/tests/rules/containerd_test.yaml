@@ -1,0 +1,402 @@
+# Containerd Pod Spec 综合语法测试规则
+# 涵盖所有支持的语法：比较操作符、字符串操作符、集合操作符、逻辑操作符、数组索引、宏和列表
+
+# ============ 列表定义 ============
+- list: allowed_namespaces
+  items: [default, kube-system, kube-public]
+
+- list: system_containers
+  items: [pause, etcd, kube-apiserver, kube-controller-manager, kube-scheduler]
+
+- list: sensitive_images
+  items: [registry.k8s.io/pause, registry.k8s.io/etcd, registry.k8s.io/kube-apiserver]
+
+- list: privileged_containers
+  items: [privileged, host-network, host-pid, host-ipc]
+
+- list: allowed_users
+  items: [root, kubelet, containerd]
+
+- list: runtime_types
+  items: [io.containerd.runc.v2, io.containerd.runtime.v1.linux]
+
+# ============ 宏定义 ============
+- macro: container_running
+  condition: container.state = "running"
+
+- macro: container_stopped
+  condition: container.state = "stopped"
+
+- macro: container_failed
+  condition: container.state = "stopped" and container.exit_code != 0
+
+- macro: privileged_container
+  condition: >
+    container.privileged = true or
+    container.host_network = true or
+    container.host_pid = true or
+    container.host_ipc = true
+
+- macro: system_pod
+  condition: pod.namespace in (allowed_namespaces)
+
+- macro: production_pod
+  condition: >
+    pod.labels.environment = "production" or
+    pod.labels.env = "prod"
+
+# ============ 比较操作符测试 ============
+- rule: Test container state not equal
+  desc: Test != operator for container state
+  condition: container.state != "stopped"
+  enabled: true
+  output: Container state not stopped (state=%container.state)
+  priority: INFO
+  tags: [test, comparison]
+
+- rule: Test restart count greater than
+  desc: Test > operator for restart count
+  condition: container.restart_count > 0
+  enabled: true
+  output: Container restarted (restarts=%container.restart_count)
+  priority: WARNING
+  tags: [test, comparison]
+
+- rule: Test exit code greater than or equal
+  desc: Test >= operator for exit code
+  condition: container.exit_code >= 1
+  enabled: true
+  output: Container failed with exit code (exit=%container.exit_code)
+  priority: ERROR
+  tags: [test, comparison]
+
+- rule: Test container pid less than
+  desc: Test < operator for container pid
+  condition: container.pid < 10000
+  enabled: true
+  output: Container pid (pid=%container.pid)
+  priority: INFO
+  tags: [test, comparison]
+
+- rule: Test task start time less than or equal
+  desc: Test <= operator for task start time
+  condition: task.start_time <= 0
+  enabled: true
+  output: Task start time (start=%task.start_time)
+  priority: INFO
+  tags: [test, comparison]
+
+# ============ 字符串操作符测试 ============
+- rule: Test image repository contains
+  desc: Test contains operator for image repository
+  condition: container.image.repository contains nginx
+  enabled: true
+  output: Image contains nginx (image=%container.image.repository)
+  priority: INFO
+  tags: [test, string]
+
+- rule: Test pod name startswith
+  desc: Test startswith operator for pod name
+  condition: pod.name startswith "nginx-"
+  enabled: true
+  output: Pod name starts with nginx- (pod=%pod.name)
+  priority: INFO
+  tags: [test, string]
+
+- rule: Test container name endswith
+  desc: Test endswith operator for container name
+  condition: container.name endswith "-sidecar"
+  enabled: true
+  output: Container name ends with -sidecar (container=%container.name)
+  priority: INFO
+  tags: [test, string]
+
+- rule: Test pod name regex match
+  desc: Test =~ operator for regex matching
+  condition: pod.name =~ "^nginx-deployment-[0-9]+$"
+  enabled: true
+  output: Pod name regex match (pod=%pod.name)
+  priority: INFO
+  tags: [test, string, regex]
+
+- rule: Test namespace regex case insensitive
+  desc: Test =~ operator with case insensitive flag
+  condition: pod.namespace =~ "(?i)DEFAULT"
+  enabled: true
+  output: Namespace case insensitive match (namespace=%pod.namespace)
+  priority: INFO
+  tags: [test, string, regex]
+
+- rule: Test image tag pmatch
+  desc: Test pmatch operator for image tag matching
+  condition: container.image.tag pmatch (latest, stable, production)
+  enabled: true
+  output: Image tag path match (tag=%container.image.tag)
+  priority: INFO
+  tags: [test, string]
+
+- rule: Test command glob
+  desc: Test glob operator for command matching
+  condition: process.cli glob "nginx*"
+  enabled: true
+  output: Command glob match (cli=%process.cli)
+  priority: INFO
+  tags: [test, string]
+
+# ============ 集合操作符测试 ============
+- rule: Test namespace in list
+  desc: Test in operator with namespace list
+  condition: pod.namespace in (allowed_namespaces)
+  enabled: true
+  output: Namespace in allowed list (namespace=%pod.namespace)
+  priority: INFO
+  tags: [test, collection]
+
+- rule: Test container name in inline list
+  desc: Test in operator with inline container list
+  condition: container.name in (nginx, redis, mysql)
+  enabled: true
+  output: Container in inline list (container=%container.name)
+  priority: INFO
+  tags: [test, collection]
+
+- rule: Test runtime type in list
+  desc: Test in operator for runtime type
+  condition: container.runtime in (runtime_types)
+  enabled: true
+  output: Runtime type match (runtime=%container.runtime)
+  priority: INFO
+  tags: [test, collection]
+
+- rule: Test pod labels exists
+  desc: Test exists operator for pod labels
+  condition: pod.labels exists
+  enabled: true
+  output: Pod labels exist (labels=%pod.labels)
+  priority: INFO
+  tags: [test, collection]
+
+- rule: Test container annotations exists
+  desc: Test exists operator for container annotations
+  condition: container.annotations exists
+  enabled: true
+  output: Container annotations exist (annotations=%container.annotations)
+  priority: INFO
+  tags: [test, collection]
+
+# ============ 逻辑操作符测试 ============
+- rule: Test and operator
+  desc: Test and operator combining conditions
+  condition: pod.name = "nginx-deployment" and pod.namespace = "default"
+  enabled: true
+  output: And operator test (pod=%pod.name namespace=%pod.namespace)
+  priority: INFO
+  tags: [test, logical]
+
+- rule: Test or operator
+  desc: Test or operator for container states
+  condition: container.state = "running" or container.state = "created"
+  enabled: true
+  output: Or operator test (state=%container.state)
+  priority: INFO
+  tags: [test, logical]
+
+- rule: Test not operator
+  desc: Test not operator for system containers
+  condition: not container.name in (system_containers)
+  enabled: true
+  output: Not system container (container=%container.name)
+  priority: INFO
+  tags: [test, logical]
+
+- rule: Test complex logical expression
+  desc: Test complex and/or/not combination
+  condition: >
+    (container.state = "running" or container.state = "created") and
+    pod.namespace = "default" and
+    not container.name in (system_containers)
+  enabled: true
+  output: Complex logical test (state=%container.state namespace=%pod.namespace container=%container.name)
+  priority: INFO
+  tags: [test, logical]
+
+# ============ 嵌套字段访问测试 ============
+- rule: Test nested image repository
+  desc: Test nested field access for image repository
+  condition: container.image.repository = "registry.k8s.io/nginx"
+  enabled: true
+  output: Image repository match (repository=%container.image.repository)
+  priority: INFO
+  tags: [test, field]
+
+- rule: Test nested user uid
+  desc: Test nested field access for user uid
+  condition: process.user.uid = 0
+  enabled: true
+  output: User uid match (uid=%process.user.uid)
+  priority: INFO
+  tags: [test, field]
+
+- rule: Test nested pod label
+  desc: Test nested field access for pod labels
+  condition: pod.labels.app = "nginx"
+  enabled: true
+  output: Pod label match (label=%pod.labels.app)
+  priority: INFO
+  tags: [test, field]
+
+- rule: Test nested container annotation
+  desc: Test nested field access for container annotations
+  condition: container.annotations.prometheus.io/scrape = true
+  enabled: true
+  output: Container annotation match (annotation=%container.annotations.prometheus.io/scrape)
+  priority: INFO
+  tags: [test, field]
+
+- rule: Test nested linux namespace
+  desc: Test nested field access for linux namespaces
+  condition: linux.namespaces.type = "pid"
+  enabled: true
+  output: Linux namespace match (namespace=%linux.namespaces.type)
+  priority: INFO
+  tags: [test, field]
+
+# ============ 宏测试 ============
+- rule: Test container running macro
+  desc: Test referencing container_running macro
+  condition: container_running and pod.namespace = "default"
+  enabled: true
+  output: Container running macro test (state=%container.state)
+  priority: INFO
+  tags: [test, macro]
+
+- rule: Test container failed macro
+  desc: Test referencing container_failed macro
+  condition: container_failed and container.restart_count > 0
+  enabled: true
+  output: Container failed macro test (exit=%container.exit_code restarts=%container.restart_count)
+  priority: WARNING
+  tags: [test, macro]
+
+- rule: Test privileged container macro
+  desc: Test referencing privileged_container macro
+  condition: privileged_container and not system_pod
+  enabled: true
+  output: Privileged container macro test (privileged=%container.privileged)
+  priority: WARNING
+  tags: [test, macro]
+
+- rule: Test production pod macro
+  desc: Test referencing production_pod macro
+  condition: production_pod and container.state = "running"
+  enabled: true
+  output: Production pod macro test (labels=%pod.labels)
+  priority: INFO
+  tags: [test, macro]
+
+# ============ 组合测试 ============
+- rule: Test complex combination
+  desc: Test combination of multiple syntax features
+  condition: >
+    container_running and
+    pod.namespace in (allowed_namespaces) and
+    not container.name in (system_containers) and
+    container.image.repository contains nginx
+  enabled: true
+  output: Complex combination test (container=%container.name namespace=%pod.namespace image=%container.image.repository)
+  priority: INFO
+  tags: [test, combination]
+
+- rule: Test regex with list and logic
+  desc: Test regex matching combined with list and logical operators
+  condition: >
+    pod.name =~ "^nginx-deployment-[0-9]+$" and
+    pod.namespace = "default" and
+    container.state = "running"
+  enabled: true
+  output: Regex with list test (pod=%pod.name namespace=%pod.namespace state=%container.state)
+  priority: INFO
+  tags: [test, combination]
+
+- rule: Test nested fields with macros
+  desc: Test nested field access combined with macro
+  condition: >
+    container_running and
+    process.user.uid = 0 and
+    pod.labels.environment = "production"
+  enabled: true
+  output: Nested with macro test (uid=%process.user.uid env=%pod.labels.environment)
+  priority: INFO
+  tags: [test, combination]
+
+- rule: Test security context
+  desc: Test security context conditions
+  condition: >
+    (container.privileged = true or
+     process.privileged = true) and
+    pod.namespace != "kube-system"
+  enabled: true
+  output: Security context test (privileged=%container.privileged namespace=%pod.namespace)
+  priority: WARNING
+  tags: [test, security]
+
+- rule: Test resource limits
+  desc: Test resource limits conditions
+  condition: >
+    linux.resources.memory.limit exists and
+    linux.resources.cpu.limit exists and
+    linux.resources.memory.limit > 0
+  enabled: true
+  output: Resource limits test (memory=%linux.resources.memory.limit cpu=%linux.resources.cpu.limit)
+  priority: INFO
+  tags: [test, resources]
+
+- rule: Test mount points
+  desc: Test mount points conditions
+  condition: >
+    linux.mounts exists and
+    linux.mounts.destination startswith "/host"
+  enabled: true
+  output: Mount points test (mount=%linux.mounts.destination)
+  priority: WARNING
+  tags: [test, security, mount]
+
+- rule: Test seccomp profile
+  desc: Test seccomp profile conditions
+  condition: >
+    linux.seccomp_profile exists and
+    linux.seccomp_profile != ""
+  enabled: true
+  output: Seccomp profile test (profile=%linux.seccomp_profile)
+  priority: INFO
+  tags: [test, security]
+
+- rule: Test apparmor profile
+  desc: Test apparmor profile conditions
+  condition: >
+    process.apparmor_profile exists and
+    process.apparmor_profile != ""
+  enabled: true
+  output: Apparmor profile test (profile=%process.apparmor_profile)
+  priority: INFO
+  tags: [test, security]
+
+- rule: Test capabilities
+  desc: Test capabilities conditions
+  condition: >
+    process.capabilities exists and
+    process.capabilities.add exists
+  enabled: true
+  output: Capabilities test (caps=%process.capabilities.add)
+  priority: WARNING
+  tags: [test, security]
+
+- rule: Test no new privileges
+  desc: Test no_new_privileges condition
+  condition: >
+    process.no_new_privileges = false and
+    container.privileged = true
+  enabled: true
+  output: No new privileges test (no_new_privileges=%process.no_new_privileges)
+  priority: WARNING
+  tags: [test, security]

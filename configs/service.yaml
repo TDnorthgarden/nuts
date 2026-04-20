@@ -1,0 +1,126 @@
+# Service Configuration
+
+# Collector configuration
+collector:
+  address: "localhost:50051"  # collector service address (gRPC)
+  timeout: "30s"              # request timeout
+  max_retries: 3              # maximum number of retries
+
+# Storage configuration
+storage:
+  # Policy storage
+  policy:
+    type: "sqlite"  # sqlite, mysql, postgres, leveldb
+    sqlite:
+      path: "/var/lib/nuts/policies.db"
+    mysql:
+      host: "localhost"
+      port: 3306
+      database: "nuts"
+      username: "nuts"
+      password: "password"
+    postgres:
+      host: "localhost"
+      port: 5432
+      database: "nuts"
+      username: "nuts"
+      password: "password"
+    leveldb:
+      path: "/var/lib/nuts/policies"
+
+  # Event storage (time-series)
+  event:
+    type: "influxdb"  # influxdb, clickhouse, timescaledb, leveldb
+    influxdb:
+      url: "http://localhost:8086"
+      token: "token"
+      org: "nuts"
+      bucket: "events"
+    clickhouse:
+      host: "localhost"
+      port: 9000
+      database: "nuts"
+      username: "default"
+      password: ""
+    timescaledb:
+      host: "localhost"
+      port: 5432
+      database: "nuts"
+      username: "nuts"
+      password: "password"
+    leveldb:
+      path: "/var/lib/nuts/events"
+
+  # Audit storage
+  audit:
+    type: "sqlite"  # sqlite, mysql, postgres
+    sqlite:
+      path: "/var/lib/nuts/audits.db"
+    mysql:
+      host: "localhost"
+      port: 3306
+      database: "nuts"
+      username: "nuts"
+      password: "password"
+    postgres:
+      host: "localhost"
+      port: 5432
+      database: "nuts"
+      username: "nuts"
+      password: "password"
+
+  # Diagnosis storage
+  diagnosis:
+    type: "sqlite"  # sqlite, mysql, postgres
+    sqlite:
+      path: "/var/lib/nuts/diagnoses.db"
+    mysql:
+      host: "localhost"
+      port: 3306
+      database: "nuts"
+      username: "nuts"
+      password: "password"
+    postgres:
+      host: "localhost"
+      port: 5432
+      database: "nuts"
+      username: "nuts"
+      password: "password"
+
+# Aggregation engine configuration
+aggregation:
+  algorithm: "simple"  # simple, timewindow, statistical, frequency, custom
+  timewindow:
+    window: "1m"  # time window size (for timewindow algorithm)
+  statistical:
+    metrics: ["mean", "median", "p95", "p99"]  # statistical metrics (for statistical algorithm)
+  frequency:
+    threshold: 10  # frequency threshold (for frequency algorithm)
+
+# Diagnostic engine configuration
+diagnostic:
+  strategy: "builtin"  # builtin (built-in rules) or ai (AI diagnosis)
+  builtin:
+    rules_path: "/opt/nuts/rules"  # built-in rules file path
+  ai:
+    enabled: false  # whether to enable AI diagnosis
+    provider: "openai"  # openai, local
+    model: "gpt-4"  # AI model
+    api_key: ""  # API key
+    api_endpoint: ""  # API endpoint
+    timeout: "30s"  # timeout
+    max_retries: 3  # maximum number of retries
+  fallback_to_builtin: true  # whether to fallback to built-in diagnosis when AI fails
+
+# Server configuration
+server:
+  address: ":8080"  # HTTP server address
+  read_timeout: "30s"
+  write_timeout: "30s"
+  idle_timeout: "60s"
+
+# Logging configuration
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json, text
+  output: "stdout"  # stdout, stderr, or file path

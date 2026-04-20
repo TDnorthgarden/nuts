@@ -1,0 +1,45 @@
+#!/usr/bin/env bpftrace
+
+// Perf collector BPF script
+// This script traces performance events within a specific cgroup
+
+#include <linux/perf_event.h>
+
+// Trace CPU cycles
+perf:hw:cpu-cycles:1000000
+{
+    // Filter by cgroup (to be configured)
+    // @cgroup_filter[cgroup] = 1;
+    
+    @cpu_cycles[pid] = count();
+}
+
+// Trace CPU instructions
+perf:hw:instructions:1000000
+{
+    // Filter by cgroup (to be configured)
+    // @cgroup_filter[cgroup] = 1;
+    
+    @instructions[pid] = count();
+}
+
+// Trace cache misses
+perf:hw:cache-misses:1000000
+{
+    // Filter by cgroup (to be configured)
+    // @cgroup_filter[cgroup] = 1;
+    
+    @cache_misses[pid] = count();
+}
+
+// Print statistics on exit
+interval:s:5
+{
+    printf("=== Perf Statistics ===\n");
+    print(@cpu_cycles);
+    print(@instructions);
+    print(@cache_misses);
+    clear(@cpu_cycles);
+    clear(@instructions);
+    clear(@cache_misses);
+}

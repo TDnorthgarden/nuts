@@ -1,0 +1,27 @@
+#!/usr/bin/env bpftrace
+
+// File collector BPF script
+// This script traces file I/O events within a specific cgroup
+
+#include <linux/fs.h>
+
+// Trace file open events
+tracepoint:syscalls:sys_enter_openat
+{
+    // Filter by cgroup (to be configured)
+    // @cgroup_filter[cgroup] = 1;
+    
+    printf("open: pid=%d comm=%s filename=%s\n", pid, comm, str(args->filename));
+}
+
+// Trace file read events
+tracepoint:syscalls:sys_enter_read
+{
+    printf("read: pid=%d comm=%s fd=%d count=%d\n", pid, comm, args->fd, args->count);
+}
+
+// Trace file write events
+tracepoint:syscalls:sys_enter_write
+{
+    printf("write: pid=%d comm=%s fd=%d count=%d\n", pid, comm, args->fd, args->count);
+}

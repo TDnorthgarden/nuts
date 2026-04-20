@@ -1,0 +1,270 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nuts-collector
+  labels:
+    app: nuts-collector
+spec:
+  selector:
+    matchLabels:
+      app: nuts-collector
+  template:
+    metadata:
+      labels:
+        app: nuts-collector
+    spec:
+      hostPID: true
+      hostNetwork: true
+      containers:
+      - name: collector
+        image: nuts-collector:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 50051
+          name: grpc
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - CAP_BPF
+            - CAP_SYS_ADMIN
+            - CAP_PERFMON
+        volumeMounts:
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+        - name: proc
+          mountPath: /proc
+          readOnly: true
+        - name: config
+          mountPath: /etc/nuts
+          readOnly: true
+        - name: scripts
+          mountPath: /opt/nuts/scripts
+          readOnly: true
+        env:
+        - name: CONFIG_PATH
+          value: "/etc/nuts/collector.yaml"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: sys
+        hostPath:
+          path: /sys
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: config
+        configMap:
+          name: nuts-collector-config
+      - name: scripts
+        configMap:
+          name: nuts-collector-scripts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nuts-collector
+  labels:
+    app: nuts-collector
+spec:
+  type: ClusterIP
+  ports:
+  - port: 50051
+    targetPort: 50051
+    protocol: TCP
+    name: grpc
+  selector:
+    app: nuts-collector
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nuts-collector-config
+data:
+  collector.yaml: |
+    # Collector Configuration
+
+    # Server configuration
+    server:
+      address: "0.0.0.0:50051"
+
+    # BPF configuration
+    bpf:
+      script_path: "/opt/nuts/scripts"
+
+    # Logging configuration
+    logging:
+      level: "info"
+      format: "json"
+      output: "stdout"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nuts-collector-scripts
+data:
+  process.bt: |
+    #!/usr/bin/env bpftrace
+
+    // Process collector BPF script
+    // This script traces process events within a specific cgroup
+
+    #include <linux/sched.h>
+
+    // Trace process exec events
+    tracepoint:syscalls:sys_enter_execve
+    {
+        // Filter by cgroup (to be configured)
+        // @cgroup_filter[cgroup] = 1;
+        
+        printf("exec: pid=%d comm=%s\n", pid, comm);
+    }
+
+    // Trace process exit events
+    tracepoint:sched:sched_process_exit
+    {
+        printf("exit: pid=%d comm=%s\n", pid, comm);
+    }
+
+  file.bt: |
+    #!/usr/bin/env bpftrace
+
+    // File collector BPF script
+    // This script traces file I/O events within a specific cgroup
+
+    #include <linux/fs.h>
+
+    // Trace file open events
+    tracepoint:syscalls:sys_enter_openat
+    {
+        // Filter by cgroup (to be configured)
+        // @cgroup_filter[cgroup] = 1;
+        
+        printf("open: pid=%d comm=%s filename=%s\n", pid, comm, str(args->filename));
+    }
+
+    // Trace file read events
+    tracepoint:syscalls:sys_enter_read
+    {
+        printf("read: pid=%d comm=%s fd=%d count=%d\n", pid, comm, args->fd, args->count);
+    }
+
+    // Trace file write events
+    tracepoint:syscalls:sys_enter_write
+    {
+        printf("write: pid=%d comm=%s fd=%d count=%d\n", pid, comm, args->fd, args->count);
+    }
+
+  network.bt: |
+    #!/usr/bin/env bpftrace
+
+    // Network collector BPF script
+    // This script traces network events within a specific cgroup
+
+    #include <net/sock.h>
+
+    // Trace TCP connect events
+    tracepoint:sock:inet_sock_set_state
+    {
+        // Filter by cgroup (to be configured)
+        // @cgroup_filter[cgroup] = 1;
+        
+        printf("tcp: pid=%d comm=%s oldstate=%d newstate=%d\n", pid, comm, args->oldstate, args->newstate);
+    }
+
+    // Trace packet transmission
+    kprobe:tcp_sendmsg
+    {
+        // Filter by cgroup (to be configured)
+        // @cgroup_filter[cgroup] = 1;
+        
+        printf("send: pid=%d comm=%s\n", pid, comm);
+    }
+
+    // Trace packet reception
+    kprobe:tcp_recvmsg
+    {
+        // Filter by cgroup (to be configured)
+        // @cgroup_filter[cgroup] = 1;
+        
+        printf("recv: pid=%d comm=%s\n", pid, comm);
+    }
+
+  io.bt: |
+    #!/usr/bin/env bpftrace
+
+    // IO collector BPF script
+    // This script traces disk I/O events within a specific cgroup
+
+    #include <linux/blkdev.h>
+
+    // Trace block device request events
+    kprobe:blk_mq_start_request
+    {
+        // Filter by cgroup (to be configured)
+        // @cgroup_filter[cgroup] = 1;
+        
+        printf("io: pid=%d comm=%s sector=%d\n", pid, comm, args->sector);
+    }
+
+    // Trace block device completion events
+    kprobe:blk_update_request
+    {
+        // Filter by cgroup (to be configured)
+        // @cgroup_filter[cgroup] = 1;
+        
+        printf("io_complete: pid=%d comm=%s\n", pid, comm);
+    }
+
+  perf.bt: |
+    #!/usr/bin/env bpftrace
+
+    // Perf collector BPF script
+    // This script traces performance events within a specific cgroup
+
+    #include <linux/perf_event.h>
+
+    // Trace CPU cycles
+    perf:hw:cpu-cycles:1000000
+    {
+        // Filter by cgroup (to be configured)
+        // @cgroup_filter[cgroup] = 1;
+        
+        @cpu_cycles[pid] = count();
+    }
+
+    // Trace CPU instructions
+    perf:hw:instructions:1000000
+    {
+        // Filter by cgroup (to be configured)
+        // @cgroup_filter[cgroup] = 1;
+        
+        @instructions[pid] = count();
+    }
+
+    // Trace cache misses
+    perf:hw:cache-misses:1000000
+    {
+        // Filter by cgroup (to be configured)
+        // @cgroup_filter[cgroup] = 1;
+        
+        @cache_misses[pid] = count();
+    }
+
+    // Print statistics on exit
+    interval:s:5
+    {
+        printf("=== Perf Statistics ===\n");
+        print(@cpu_cycles);
+        print(@instructions);
+        print(@cache_misses);
+        clear(@cpu_cycles);
+        clear(@instructions);
+        clear(@cache_misses);
+    }

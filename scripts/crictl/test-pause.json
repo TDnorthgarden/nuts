@@ -1,0 +1,13 @@
+{
+    "metadata": {
+        "name": "test-pause",
+        "attempt": 1
+    },
+    "image": {
+        "image": "registry.aliyuncs.com/google_containers/pause:3.9"
+    },
+    "command": [
+        "/pause"
+    ],
+    "log_path": "test-pause.log"
+}

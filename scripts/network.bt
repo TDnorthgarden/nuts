@@ -1,0 +1,33 @@
+#!/usr/bin/env bpftrace
+
+// Network collector BPF script
+// This script traces network events within a specific cgroup
+
+#include <net/sock.h>
+
+// Trace TCP connect events
+tracepoint:sock:inet_sock_set_state
+{
+    // Filter by cgroup (to be configured)
+    // @cgroup_filter[cgroup] = 1;
+    
+    printf("tcp: pid=%d comm=%s oldstate=%d newstate=%d\n", pid, comm, args->oldstate, args->newstate);
+}
+
+// Trace packet transmission
+kprobe:tcp_sendmsg
+{
+    // Filter by cgroup (to be configured)
+    // @cgroup_filter[cgroup] = 1;
+    
+    printf("send: pid=%d comm=%s\n", pid, comm);
+}
+
+// Trace packet reception
+kprobe:tcp_recvmsg
+{
+    // Filter by cgroup (to be configured)
+    // @cgroup_filter[cgroup] = 1;
+    
+    printf("recv: pid=%d comm=%s\n", pid, comm);
+}

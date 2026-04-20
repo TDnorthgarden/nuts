@@ -1,0 +1,24 @@
+#!/usr/bin/env bpftrace
+
+// IO collector BPF script
+// This script traces disk I/O events within a specific cgroup
+
+#include <linux/blkdev.h>
+
+// Trace block device request events
+kprobe:blk_mq_start_request
+{
+    // Filter by cgroup (to be configured)
+    // @cgroup_filter[cgroup] = 1;
+    
+    printf("io: pid=%d comm=%s sector=%d\n", pid, comm, args->sector);
+}
+
+// Trace block device completion events
+kprobe:blk_update_request
+{
+    // Filter by cgroup (to be configured)
+    // @cgroup_filter[cgroup] = 1;
+    
+    printf("io_complete: pid=%d comm=%s\n", pid, comm);
+}
