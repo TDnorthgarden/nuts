@@ -118,8 +118,8 @@ func (sm *StateMachine) Transition(to State, reason string) error {
 	}
 	sm.history = append(sm.history, transition)
 
-	// Call transition handlers
-	if handlers, ok := sm.transition[sm.current]; ok {
+	// Call transition handlers for the target state
+	if handlers, ok := sm.transition[to]; ok {
 		for _, handler := range handlers {
 			if err := handler(sm.current, to, reason); err != nil {
 				return fmt.Errorf("transition handler error: %w", err)
@@ -155,11 +155,11 @@ func (sm *StateMachine) History() []StateTransition {
 	return append([]StateTransition{}, sm.history...)
 }
 
-// RegisterHandler registers a handler for state transitions from a specific state
-func (sm *StateMachine) RegisterHandler(from State, handler TransitionHandler) {
+// RegisterHandler registers a handler for state transitions to a specific state
+func (sm *StateMachine) RegisterHandler(to State, handler TransitionHandler) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	sm.transition[from] = append(sm.transition[from], handler)
+	sm.transition[to] = append(sm.transition[to], handler)
 }
 
 // Reset resets the state machine to the initial state

@@ -213,6 +213,8 @@ func (s *Service) handleTaskStateTransition(event *datasource.Event, policyID st
 			return nil
 		}
 
+		log.Printf("[Service] Creating new task for entity %s with policy %s", event.ID, policyID)
+
 		// Generate unique task ID using entity ID
 		newTaskID := fmt.Sprintf("%s-%s-%d", policyID, event.ID, time.Now().Unix())
 
@@ -231,7 +233,8 @@ func (s *Service) handleTaskStateTransition(event *datasource.Event, policyID st
 		if err := task.StartCollecting(fmt.Sprintf("Event %s triggered task creation", event.Type)); err != nil {
 			return fmt.Errorf("failed to start collecting: %w", err)
 		}
-		log.Printf("[Service] Created new task %s for entity %s on event %s", newTaskID, event.ID, event.Type)
+		log.Printf("[Service] Created new task %s for entity %s on event %s, current state: %s",
+			newTaskID, event.ID, event.Type, task.StateMachine.Current())
 
 	case datasource.EventTypeStopContainer, datasource.EventTypeStopPodSandbox:
 		// Stop task for this entity (pod/container) when it exits
@@ -241,21 +244,23 @@ func (s *Service) handleTaskStateTransition(event *datasource.Event, policyID st
 		task := taskManager.GetTaskByEntityID(event.ID, policyID)
 
 		if task != nil {
-			// Only stop tasks that are currently in Collecting state
-			if task.StateMachine.Current() == statemachine.StateCollecting {
-				// Transition to stopped state - this will trigger NotifyCollectorStop
-				if err := task.Stop(fmt.Sprintf("Event %s triggered task stop", event.Type)); err != nil {
-					log.Printf("[Service] Failed to stop task %s: %v", task.ID, err)
-				} else {
-					log.Printf("[Service] Stopped task %s (policy %s) for entity %s on event %s", task.ID, task.PolicyID, event.ID, event.Type)
-				}
+			currentState := task.StateMachine.Current()
+			log.Printf("[Service] Found task %s (policy %s) for entity %s in state %s",
+				task.ID, task.PolicyID, event.ID, currentState)
 
-				// Delete task from task manager after stopping
-				taskManager.DeleteTask(task.ID)
+			// Only stop tasks that are currently in Collecting state
+			if currentState == statemachine.StateCollecting {
+				// Transition to aggregating state - this will trigger NotifyCollectorStop and NotifyAggregationStart
+				if err := task.StartAggregating(fmt.Sprintf("Event %s triggered task aggregation", event.Type)); err != nil {
+					log.Printf("[Service] Failed to start aggregating task %s: %v", task.ID, err)
+				} else {
+					log.Printf("[Service] Task %s (policy %s) for entity %s transitioned to aggregating on event %s, new state: %s",
+						task.ID, task.PolicyID, event.ID, event.Type, task.StateMachine.Current())
+				}
 			} else {
 				// Task is not in Collecting state, skip it
 				log.Printf("[Service] Task %s (policy %s) for entity %s is in state %s, skipping stop on event %s",
-					task.ID, task.PolicyID, event.ID, task.StateMachine.Current(), event.Type)
+					task.ID, task.PolicyID, event.ID, currentState, event.Type)
 			}
 		} else {
 			log.Printf("[Service] No task found for entity %s and policy %s", event.ID, policyID)

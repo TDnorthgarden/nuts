@@ -212,6 +212,18 @@ func (t *Task) StartCollecting(reason string) error {
 	return nil
 }
 
+// StartAggregating transitions the task to aggregating state
+func (t *Task) StartAggregating(reason string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if err := t.StateMachine.Transition(statemachine.StateAggregating, reason); err != nil {
+		return fmt.Errorf("failed to start aggregating: %w", err)
+	}
+
+	return nil
+}
+
 // Stop transitions the task to stopped state
 func (t *Task) Stop(reason string) error {
 	t.mu.Lock()
