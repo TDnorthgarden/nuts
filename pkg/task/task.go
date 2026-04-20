@@ -9,12 +9,66 @@ import (
 	"github.com/nuts-project/nuts/pkg/statemachine"
 )
 
+// TaskState represents state of a task
+type TaskState int
+
+const (
+	TaskStateIdle      TaskState = iota // Idle: Policy created, waiting for match
+	TaskStatePending                    // Pending: Matched, waiting to start
+	TaskStateRunning                    // Running: Collecting
+	TaskStateCompleted                  // Completed: Duration expired
+	TaskStateStopped                    // Stopped: Pod/container stopped
+	TaskStateFailed                     // Failed: Collector or aggregation engine failed
+)
+
+// String returns string representation of task state
+func (s TaskState) String() string {
+	switch s {
+	case TaskStateIdle:
+		return "idle"
+	case TaskStatePending:
+		return "pending"
+	case TaskStateRunning:
+		return "running" // Represents Collecting, Aggregating, or Diagnosing
+	case TaskStateCompleted:
+		return "completed"
+	case TaskStateStopped:
+		return "stopped"
+	case TaskStateFailed:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}
+
+// TaskStore is the interface for persisting tasks
+type TaskStore interface {
+	// Create creates a new task
+	Create(task *Task) error
+
+	// Update updates an existing task
+	Update(task *Task) error
+
+	// Get retrieves a task by ID
+	Get(id string) (*Task, error)
+
+	// GetByCgroupAndPolicy retrieves a task by cgroup ID and policy ID
+	GetByCgroupAndPolicy(cgroupID, policyID string) (*Task, error)
+
+	// GetByState retrieves all tasks with a specific state
+	GetByState(state TaskState) ([]*Task, error)
+
+	// Delete deletes a task
+	Delete(id string) error
+}
+
 // Task represents a policy task with state management
 type Task struct {
 	mu           sync.RWMutex
 	ID           string
 	PolicyID     string
-	CgroupID     string
+	EntityID     string // Pod ID or Container ID (used as key)
+	CgroupID     string // Cgroup ID (metadata only)
 	StateMachine *statemachine.StateMachine
 	StartTime    time.Time
 	EndTime      time.Time
@@ -34,12 +88,13 @@ type TaskResult struct {
 }
 
 // NewTask creates a new policy task
-func NewTask(id, policyID, cgroupID string, metrics map[string][]string, duration time.Duration, notifier policy.PolicyNotifier) *Task {
+func NewTask(id, policyID, entityID, cgroupID string, metrics map[string][]string, duration time.Duration, notifier policy.PolicyNotifier) *Task {
 	sm := statemachine.NewStateMachine(statemachine.StateCreated)
 
 	task := &Task{
 		ID:           id,
 		PolicyID:     policyID,
+		EntityID:     entityID,
 		CgroupID:     cgroupID,
 		StateMachine: sm,
 		StartTime:    time.Now(),
@@ -57,11 +112,21 @@ func NewTask(id, policyID, cgroupID string, metrics map[string][]string, duratio
 
 // registerStateHandlers registers handlers for state transitions
 func (t *Task) registerStateHandlers() {
-	// Handler for Created -> Running transition
-	t.StateMachine.RegisterHandler(statemachine.StateRunning, func(from, to statemachine.State, reason string) error {
+	// Handler for Created -> Collecting transition
+	t.StateMachine.RegisterHandler(statemachine.StateCollecting, func(from, to statemachine.State, reason string) error {
 		if t.notifier != nil {
 			if err := t.notifier.NotifyCollectorStart(t.CgroupID, t.PolicyID, t.Metrics); err != nil {
 				return fmt.Errorf("failed to notify collector start: %w", err)
+			}
+		}
+		return nil
+	})
+
+	// Handler for Collecting -> Aggregating transition
+	t.StateMachine.RegisterHandler(statemachine.StateAggregating, func(from, to statemachine.State, reason string) error {
+		if t.notifier != nil {
+			if err := t.notifier.NotifyCollectorStop(t.CgroupID, t.PolicyID); err != nil {
+				return fmt.Errorf("failed to notify collector stop: %w", err)
 			}
 			if err := t.notifier.NotifyAggregationStart(t.CgroupID, t.PolicyID, t.Duration); err != nil {
 				return fmt.Errorf("failed to notify aggregation start: %w", err)
@@ -70,24 +135,55 @@ func (t *Task) registerStateHandlers() {
 		return nil
 	})
 
-	// Handler for Running -> Stopped transition
-	t.StateMachine.RegisterHandler(statemachine.StateStopped, func(from, to statemachine.State, reason string) error {
+	// Handler for Aggregating -> Diagnosing transition
+	t.StateMachine.RegisterHandler(statemachine.StateDiagnosing, func(from, to statemachine.State, reason string) error {
 		if t.notifier != nil {
-			if err := t.notifier.NotifyCollectorStop(t.CgroupID, t.PolicyID); err != nil {
-				return fmt.Errorf("failed to notify collector stop: %w", err)
-			}
 			if err := t.notifier.NotifyAggregationStop(t.CgroupID, t.PolicyID); err != nil {
 				return fmt.Errorf("failed to notify aggregation stop: %w", err)
+			}
+			if err := t.notifier.NotifyAnalysisStart(t.CgroupID, t.PolicyID); err != nil {
+				return fmt.Errorf("failed to notify analysis start: %w", err)
 			}
 		}
 		return nil
 	})
 
-	// Handler for any -> Completed transition
+	// Handler for Diagnosing -> Completed transition
 	t.StateMachine.RegisterHandler(statemachine.StateCompleted, func(from, to statemachine.State, reason string) error {
 		if t.notifier != nil {
+			if err := t.notifier.NotifyAnalysisStop(t.CgroupID, t.PolicyID); err != nil {
+				return fmt.Errorf("failed to notify analysis stop: %w", err)
+			}
+			if err := t.notifier.NotifyReportStart(t.CgroupID, t.PolicyID); err != nil {
+				return fmt.Errorf("failed to notify report start: %w", err)
+			}
 			if err := t.notifier.NotifyTaskCompleted(t.ID, t.CgroupID, t.PolicyID); err != nil {
 				return fmt.Errorf("failed to notify task completed: %w", err)
+			}
+		}
+		return nil
+	})
+
+	// Handler for Collecting/Aggregating/Diagnosing -> Stopped transition (pod/container stop event)
+	t.StateMachine.RegisterHandler(statemachine.StateStopped, func(from, to statemachine.State, reason string) error {
+		if t.notifier != nil {
+			// Stop collector if in collecting state
+			if from == statemachine.StateCollecting {
+				if err := t.notifier.NotifyCollectorStop(t.CgroupID, t.PolicyID); err != nil {
+					return fmt.Errorf("failed to notify collector stop: %w", err)
+				}
+			}
+			// Stop aggregation if in aggregating state
+			if from == statemachine.StateAggregating {
+				if err := t.notifier.NotifyAggregationStop(t.CgroupID, t.PolicyID); err != nil {
+					return fmt.Errorf("failed to notify aggregation stop: %w", err)
+				}
+			}
+			// Stop analysis if in diagnosing state
+			if from == statemachine.StateDiagnosing {
+				if err := t.notifier.NotifyAnalysisStop(t.CgroupID, t.PolicyID); err != nil {
+					return fmt.Errorf("failed to notify analysis stop: %w", err)
+				}
 			}
 		}
 		return nil
@@ -104,13 +200,25 @@ func (t *Task) registerStateHandlers() {
 	})
 }
 
-// StartRunning transitions the task to running state
-func (t *Task) StartRunning(reason string) error {
+// StartCollecting transitions the task to collecting state
+func (t *Task) StartCollecting(reason string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if err := t.StateMachine.Transition(statemachine.StateRunning, reason); err != nil {
-		return fmt.Errorf("failed to start running: %w", err)
+	if err := t.StateMachine.Transition(statemachine.StateCollecting, reason); err != nil {
+		return fmt.Errorf("failed to start collecting: %w", err)
+	}
+
+	return nil
+}
+
+// StartAggregating transitions the task to aggregating state
+func (t *Task) StartAggregating(reason string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if err := t.StateMachine.Transition(statemachine.StateAggregating, reason); err != nil {
+		return fmt.Errorf("failed to start aggregating: %w", err)
 	}
 
 	return nil
@@ -227,6 +335,7 @@ func (t *Task) ToPolicyEvent() *policy.Event {
 type TaskManager struct {
 	mu       sync.RWMutex
 	tasks    map[string]*Task
+	store    TaskStore
 	notifier policy.PolicyNotifier
 }
 
@@ -234,8 +343,16 @@ type TaskManager struct {
 func NewTaskManager(notifier policy.PolicyNotifier) *TaskManager {
 	return &TaskManager{
 		tasks:    make(map[string]*Task),
+		store:    NewMemoryTaskStore(),
 		notifier: notifier,
 	}
+}
+
+// SetStore sets the task store
+func (tm *TaskManager) SetStore(store TaskStore) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.store = store
 }
 
 // SetNotifier sets the policy notifier for the task manager
@@ -246,12 +363,21 @@ func (tm *TaskManager) SetNotifier(notifier policy.PolicyNotifier) {
 }
 
 // CreateTask creates a new task
-func (tm *TaskManager) CreateTask(id, policyID, cgroupID string, metrics map[string][]string, duration time.Duration) *Task {
+func (tm *TaskManager) CreateTask(id, policyID, entityID, cgroupID string, metrics map[string][]string, duration time.Duration) *Task {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
-	task := NewTask(id, policyID, cgroupID, metrics, duration, tm.notifier)
+	task := NewTask(id, policyID, entityID, cgroupID, metrics, duration, tm.notifier)
 	tm.tasks[id] = task
+
+	// Persist to store
+	if tm.store != nil {
+		if err := tm.store.Create(task); err != nil {
+			// Log error but don't fail task creation
+			fmt.Printf("Failed to persist task to store: %v\n", err)
+		}
+	}
+
 	return task
 }
 
@@ -270,6 +396,86 @@ func (tm *TaskManager) DeleteTask(id string) {
 	defer tm.mu.Unlock()
 
 	delete(tm.tasks, id)
+
+	// Delete from store
+	if tm.store != nil {
+		if err := tm.store.Delete(id); err != nil {
+			fmt.Printf("Failed to delete task from store: %v\n", err)
+		}
+	}
+}
+
+// GetOrCreateTaskByEntityID gets an existing task or creates a new one
+func (tm *TaskManager) GetOrCreateTaskByEntityID(id, policyID, entityID, cgroupID string, metrics map[string][]string, duration time.Duration) (*Task, bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	// Check if task already exists for this entity ID and policy
+	for _, task := range tm.tasks {
+		if task.EntityID == entityID && task.PolicyID == policyID {
+			// Only return non-terminal tasks
+			if !task.StateMachine.IsTerminal() {
+				return task, true
+			}
+		}
+	}
+
+	// Create new task
+	task := NewTask(id, policyID, entityID, cgroupID, metrics, duration, tm.notifier)
+	tm.tasks[id] = task
+
+	// Persist to store
+	if tm.store != nil {
+		if err := tm.store.Create(task); err != nil {
+			fmt.Printf("Failed to persist task to store: %v\n", err)
+		}
+	}
+
+	return task, false
+}
+
+// UpdateTaskState updates task state and persists to store
+func (tm *TaskManager) UpdateTaskState(taskID string, newState TaskState, reason string) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	task, exists := tm.tasks[taskID]
+	if !exists {
+		return fmt.Errorf("task %s not found", taskID)
+	}
+
+	// Convert TaskState to statemachine.State
+	var smState statemachine.State
+	switch newState {
+	case TaskStateIdle:
+		smState = statemachine.StateCreated
+	case TaskStatePending:
+		smState = statemachine.StateCreated
+	case TaskStateRunning:
+		smState = statemachine.StateCollecting
+	case TaskStateStopped:
+		smState = statemachine.StateStopped
+	case TaskStateCompleted:
+		smState = statemachine.StateCompleted
+	case TaskStateFailed:
+		smState = statemachine.StateFailed
+	default:
+		return fmt.Errorf("invalid task state: %s", newState)
+	}
+
+	// Transition state
+	if err := task.StateMachine.Transition(smState, reason); err != nil {
+		return fmt.Errorf("failed to transition task state: %w", err)
+	}
+
+	// Update in store
+	if tm.store != nil {
+		if err := tm.store.Update(task); err != nil {
+			fmt.Printf("Failed to update task in store: %v\n", err)
+		}
+	}
+
+	return nil
 }
 
 // ListTasks returns all tasks
@@ -310,6 +516,19 @@ func (tm *TaskManager) ListTasksByCgroup(cgroupID string) []*Task {
 		}
 	}
 	return tasks
+}
+
+// GetTaskByEntityID returns a task for a specific entity ID and policy
+func (tm *TaskManager) GetTaskByEntityID(entityID, policyID string) *Task {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	for _, task := range tm.tasks {
+		if task.EntityID == entityID && task.PolicyID == policyID {
+			return task
+		}
+	}
+	return nil
 }
 
 // ListTasksByState returns all tasks in a specific state

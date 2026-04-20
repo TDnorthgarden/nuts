@@ -1,24 +1,12 @@
-package algorithm
+package aggregation
 
 import (
 	"fmt"
 	"sort"
 	"time"
 
-	"github.com/nuts-project/nuts/pkg/aggregation"
+	"github.com/nuts-project/nuts/pkg/storage"
 )
-
-// AggregationAlgorithm is the interface for all aggregation algorithms
-type AggregationAlgorithm interface {
-	// Name returns the name of the algorithm
-	Name() string
-
-	// Aggregate aggregates a list of events
-	Aggregate(events []*aggregation.Event) (*aggregation.AggregatedEvent, error)
-
-	// Validate validates the events before aggregation
-	Validate(events []*aggregation.Event) error
-}
 
 // SimpleAggregationAlgorithm implements simple deduplication aggregation
 type SimpleAggregationAlgorithm struct{}
@@ -34,7 +22,7 @@ func (a *SimpleAggregationAlgorithm) Name() string {
 }
 
 // Aggregate aggregates events using simple deduplication
-func (a *SimpleAggregationAlgorithm) Aggregate(events []*aggregation.Event) (*aggregation.AggregatedEvent, error) {
+func (a *SimpleAggregationAlgorithm) Aggregate(events []*storage.Event) (*AggregatedEvent, error) {
 	if err := a.Validate(events); err != nil {
 		return nil, err
 	}
@@ -60,7 +48,7 @@ func (a *SimpleAggregationAlgorithm) Aggregate(events []*aggregation.Event) (*ag
 	}
 
 	// Deduplicate events by type and data
-	uniqueEvents := make(map[string]*aggregation.Event)
+	uniqueEvents := make(map[string]*storage.Event)
 	for _, event := range events {
 		key := fmt.Sprintf("%s:%v", event.Type, event.Data)
 		uniqueEvents[key] = event
@@ -82,7 +70,7 @@ func (a *SimpleAggregationAlgorithm) Aggregate(events []*aggregation.Event) (*ag
 	}
 
 	// Create aggregated event
-	aggregatedEvent := &aggregation.AggregatedEvent{
+	aggregatedEvent := &AggregatedEvent{
 		ID:         generateAggregatedID(events[0].CgroupID, events[0].PolicyID, minTime),
 		CgroupID:   events[0].CgroupID,
 		PolicyID:   events[0].PolicyID,
@@ -97,7 +85,7 @@ func (a *SimpleAggregationAlgorithm) Aggregate(events []*aggregation.Event) (*ag
 }
 
 // Validate validates the events
-func (a *SimpleAggregationAlgorithm) Validate(events []*aggregation.Event) error {
+func (a *SimpleAggregationAlgorithm) Validate(events []*storage.Event) error {
 	if len(events) == 0 {
 		return fmt.Errorf("events list is empty")
 	}
@@ -139,7 +127,7 @@ func (a *TimeWindowAggregationAlgorithm) Name() string {
 }
 
 // Aggregate aggregates events using time window
-func (a *TimeWindowAggregationAlgorithm) Aggregate(events []*aggregation.Event) (*aggregation.AggregatedEvent, error) {
+func (a *TimeWindowAggregationAlgorithm) Aggregate(events []*storage.Event) (*AggregatedEvent, error) {
 	if err := a.Validate(events); err != nil {
 		return nil, err
 	}
@@ -154,7 +142,7 @@ func (a *TimeWindowAggregationAlgorithm) Aggregate(events []*aggregation.Event) 
 	})
 
 	// Group events into time windows
-	windows := make(map[int64][]*aggregation.Event)
+	windows := make(map[int64][]*storage.Event)
 	for _, event := range events {
 		windowStart := event.Timestamp.Truncate(a.window).Unix()
 		windows[windowStart] = append(windows[windowStart], event)
@@ -199,7 +187,7 @@ func (a *TimeWindowAggregationAlgorithm) Aggregate(events []*aggregation.Event) 
 	}
 
 	// Create aggregated event
-	aggregatedEvent := &aggregation.AggregatedEvent{
+	aggregatedEvent := &AggregatedEvent{
 		ID:         generateAggregatedID(events[0].CgroupID, events[0].PolicyID, minTime),
 		CgroupID:   events[0].CgroupID,
 		PolicyID:   events[0].PolicyID,
@@ -214,7 +202,7 @@ func (a *TimeWindowAggregationAlgorithm) Aggregate(events []*aggregation.Event) 
 }
 
 // Validate validates the events
-func (a *TimeWindowAggregationAlgorithm) Validate(events []*aggregation.Event) error {
+func (a *TimeWindowAggregationAlgorithm) Validate(events []*storage.Event) error {
 	if len(events) == 0 {
 		return fmt.Errorf("events list is empty")
 	}
@@ -256,7 +244,7 @@ func (a *StatisticalAggregationAlgorithm) Name() string {
 }
 
 // Aggregate aggregates events using statistical methods
-func (a *StatisticalAggregationAlgorithm) Aggregate(events []*aggregation.Event) (*aggregation.AggregatedEvent, error) {
+func (a *StatisticalAggregationAlgorithm) Aggregate(events []*storage.Event) (*AggregatedEvent, error) {
 	if err := a.Validate(events); err != nil {
 		return nil, err
 	}
@@ -304,7 +292,7 @@ func (a *StatisticalAggregationAlgorithm) Aggregate(events []*aggregation.Event)
 	}
 
 	// Create aggregated event
-	aggregatedEvent := &aggregation.AggregatedEvent{
+	aggregatedEvent := &AggregatedEvent{
 		ID:         generateAggregatedID(events[0].CgroupID, events[0].PolicyID, minTime),
 		CgroupID:   events[0].CgroupID,
 		PolicyID:   events[0].PolicyID,
@@ -319,7 +307,7 @@ func (a *StatisticalAggregationAlgorithm) Aggregate(events []*aggregation.Event)
 }
 
 // Validate validates the events
-func (a *StatisticalAggregationAlgorithm) Validate(events []*aggregation.Event) error {
+func (a *StatisticalAggregationAlgorithm) Validate(events []*storage.Event) error {
 	if len(events) == 0 {
 		return fmt.Errorf("events list is empty")
 	}
@@ -361,7 +349,7 @@ func (a *FrequencyAggregationAlgorithm) Name() string {
 }
 
 // Aggregate aggregates events using frequency analysis
-func (a *FrequencyAggregationAlgorithm) Aggregate(events []*aggregation.Event) (*aggregation.AggregatedEvent, error) {
+func (a *FrequencyAggregationAlgorithm) Aggregate(events []*storage.Event) (*AggregatedEvent, error) {
 	if err := a.Validate(events); err != nil {
 		return nil, err
 	}
@@ -402,7 +390,7 @@ func (a *FrequencyAggregationAlgorithm) Aggregate(events []*aggregation.Event) (
 	}
 
 	// Create aggregated event
-	aggregatedEvent := &aggregation.AggregatedEvent{
+	aggregatedEvent := &AggregatedEvent{
 		ID:         generateAggregatedID(events[0].CgroupID, events[0].PolicyID, minTime),
 		CgroupID:   events[0].CgroupID,
 		PolicyID:   events[0].PolicyID,
@@ -417,7 +405,7 @@ func (a *FrequencyAggregationAlgorithm) Aggregate(events []*aggregation.Event) (
 }
 
 // Validate validates the events
-func (a *FrequencyAggregationAlgorithm) Validate(events []*aggregation.Event) error {
+func (a *FrequencyAggregationAlgorithm) Validate(events []*storage.Event) error {
 	if len(events) == 0 {
 		return fmt.Errorf("events list is empty")
 	}
@@ -457,13 +445,13 @@ func (a *CustomAggregationAlgorithm) Name() string {
 }
 
 // Aggregate aggregates events using custom logic
-func (a *CustomAggregationAlgorithm) Aggregate(events []*aggregation.Event) (*aggregation.AggregatedEvent, error) {
+func (a *CustomAggregationAlgorithm) Aggregate(events []*storage.Event) (*AggregatedEvent, error) {
 	// Implementation to be added by user
-	return &aggregation.AggregatedEvent{}, fmt.Errorf("custom aggregation not implemented")
+	return &AggregatedEvent{}, fmt.Errorf("custom aggregation not implemented")
 }
 
 // Validate validates the events
-func (a *CustomAggregationAlgorithm) Validate(events []*aggregation.Event) error {
+func (a *CustomAggregationAlgorithm) Validate(events []*storage.Event) error {
 	if len(events) == 0 {
 		return fmt.Errorf("events list is empty")
 	}

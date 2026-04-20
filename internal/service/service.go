@@ -10,6 +10,7 @@ import (
 	"github.com/nuts-project/nuts/pkg/datasource"
 	"github.com/nuts-project/nuts/pkg/policy"
 	"github.com/nuts-project/nuts/pkg/policyengine"
+	"github.com/nuts-project/nuts/pkg/statemachine"
 )
 
 // Service represents the main service
@@ -21,10 +22,6 @@ type Service struct {
 	policyEngine *policyengine.Engine
 	notifier     policy.PolicyNotifier
 	running      bool
-	// Track active tasks by unique key to avoid duplicates
-	// Key format: "policyid:namespace:pod_name:event_id" for pod-level tasks
-	// Key format: "policyid:namespace:pod_name:container:event_id" for container-level tasks
-	activeTasks map[string]string // key -> taskID
 }
 
 // NewService creates a new service instance
@@ -32,7 +29,6 @@ func NewService() *Service {
 	return &Service{
 		dataSource:   datasource.NewNRIDataSource(),
 		policyEngine: policyengine.NewEngine(),
-		activeTasks:  make(map[string]string),
 		notifier:     &serviceNotifier{},
 	}
 }
@@ -197,68 +193,77 @@ func (s *Service) HandleEvent(event *datasource.Event) error {
 	return nil
 }
 
-// getTaskKey generates a unique key for a task based on event and policy ID
-// For container-level events: "policyid:namespace:pod_name:container:event_id"
-// For pod-level events: "policyid:namespace:pod_name:event_id"
-func (s *Service) getTaskKey(event *datasource.Event, policyID string) string {
-	if event.Container != "" {
-		// Container-level task
-		return fmt.Sprintf("%s:%s:%s:%s:%s", policyID, event.Namespace, event.PodName, event.Container, event.ID)
-	}
-	// Pod-level task
-	return fmt.Sprintf("%s:%s:%s:%s", policyID, event.Namespace, event.PodName, event.ID)
-}
-
 // handleTaskStateTransition manages task state transitions based on event type
 func (s *Service) handleTaskStateTransition(event *datasource.Event, policyID string, duration int64, metrics map[string][]string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	eventType := datasource.EventType(event.Type)
-	taskKey := s.getTaskKey(event, policyID)
-
-	// Check if there's an active task for this pod/container
-	taskID, exists := s.activeTasks[taskKey]
 
 	switch eventType {
 	case datasource.EventTypeRunPodSandbox, datasource.EventTypeStartContainer:
-		// Create new task if not exists
-		if !exists {
-			// Generate unique task ID
-			newTaskID := fmt.Sprintf("%s-%d", taskKey, time.Now().Unix())
+		// Check if task already exists for this entity (pod/container) and policy
+		taskManager := s.policyEngine.GetTaskManager()
+		existingTask := taskManager.GetTaskByEntityID(event.ID, policyID)
 
-			// Create task in policy engine with policy duration and metrics
-			taskDuration := time.Duration(duration) * time.Second
-			task := s.policyEngine.GetTaskManager().CreateTask(newTaskID, policyID, event.CgroupID, metrics, taskDuration)
-
-			// Transition to running state - this will automatically trigger notifications
-			if err := task.StartRunning(fmt.Sprintf("Event %s triggered task creation", event.Type)); err != nil {
-				return fmt.Errorf("failed to start running: %w", err)
-			}
-
-			// Track active task
-			s.activeTasks[taskKey] = newTaskID
-
-			log.Printf("[Service] Created new task %s for key %s on event %s", newTaskID, taskKey, event.Type)
-		} else {
-			log.Printf("[Service] Task %s already exists for key %s, skipping", taskID, taskKey)
+		if existingTask != nil && !existingTask.StateMachine.IsTerminal() {
+			// Task already exists and is running, skip creation
+			log.Printf("[Service] Task %s (policy %s) already exists for entity %s in state %s, skipping event %s",
+				existingTask.ID, policyID, event.ID, existingTask.StateMachine.Current(), event.Type)
+			return nil
 		}
 
-	case datasource.EventTypeStopContainer, datasource.EventTypeStopPodSandbox:
-		// Stop task and delete it
-		if exists {
-			if task, ok := s.policyEngine.GetTask(taskID); ok {
-				// Transition to stopped state - this will automatically trigger notifications
-				if err := task.Stop(fmt.Sprintf("Event %s triggered task stop", event.Type)); err != nil {
-					log.Printf("[Service] Failed to stop task: %v", err)
-				}
+		log.Printf("[Service] Creating new task for entity %s with policy %s", event.ID, policyID)
 
-				log.Printf("[Service] Stopped task %s on event %s", taskID, event.Type)
+		// Generate unique task ID using entity ID
+		newTaskID := fmt.Sprintf("%s-%s-%d", policyID, event.ID, time.Now().Unix())
+
+		// Create task in policy engine with policy duration and metrics
+		taskDuration := time.Duration(duration) * time.Second
+		task, _ := taskManager.GetOrCreateTaskByEntityID(
+			newTaskID,
+			policyID,
+			event.ID, // Use event ID (Pod ID or Container ID) as entity ID
+			event.CgroupID,
+			metrics,
+			taskDuration,
+		)
+
+		// New task created, transition to collecting state
+		if err := task.StartCollecting(fmt.Sprintf("Event %s triggered task creation", event.Type)); err != nil {
+			return fmt.Errorf("failed to start collecting: %w", err)
+		}
+		log.Printf("[Service] Created new task %s for entity %s on event %s, current state: %s",
+			newTaskID, event.ID, event.Type, task.StateMachine.Current())
+
+	case datasource.EventTypeStopContainer, datasource.EventTypeStopPodSandbox:
+		// Stop task for this entity (pod/container) when it exits
+		// Only stop tasks that are in Collecting state
+		// Tasks in other states (Aggregating, Diagnosing, Completed, Failed, Stopped) are not affected
+		taskManager := s.policyEngine.GetTaskManager()
+		task := taskManager.GetTaskByEntityID(event.ID, policyID)
+
+		if task != nil {
+			currentState := task.StateMachine.Current()
+			log.Printf("[Service] Found task %s (policy %s) for entity %s in state %s",
+				task.ID, task.PolicyID, event.ID, currentState)
+
+			// Only stop tasks that are currently in Collecting state
+			if currentState == statemachine.StateCollecting {
+				// Transition to aggregating state - this will trigger NotifyCollectorStop and NotifyAggregationStart
+				if err := task.StartAggregating(fmt.Sprintf("Event %s triggered task aggregation", event.Type)); err != nil {
+					log.Printf("[Service] Failed to start aggregating task %s: %v", task.ID, err)
+				} else {
+					log.Printf("[Service] Task %s (policy %s) for entity %s transitioned to aggregating on event %s, new state: %s",
+						task.ID, task.PolicyID, event.ID, event.Type, task.StateMachine.Current())
+				}
+			} else {
+				// Task is not in Collecting state, skip it
+				log.Printf("[Service] Task %s (policy %s) for entity %s is in state %s, skipping stop on event %s",
+					task.ID, task.PolicyID, event.ID, currentState, event.Type)
 			}
-			// Delete task from task manager
-			s.policyEngine.GetTaskManager().DeleteTask(taskID)
-			// Remove from active tasks
-			delete(s.activeTasks, taskKey)
+		} else {
+			log.Printf("[Service] No task found for entity %s and policy %s", event.ID, policyID)
 		}
 
 	default:
