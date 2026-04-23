@@ -1,8 +1,17 @@
-# NUTS 故障分析插件实例设计文档
+# NUTS 故障分析插件实例
 
-## 文档说明
+## 前言
 
 本文档是 NUTS 项目的故障分析插件实例设计文档，描述基于通用框架实现的故障分析插件的具体设计，包括采集器、聚合引擎、诊断引擎等业务相关组件。
+
+**混合架构设计**：
+框架采用混合架构，根据组件部署位置选择最优的通信方式，兼顾性能和分布式需求：
+- **进程内通信**：数据源和策略引擎在同一进程内，通过Go Channel直接通信（零拷贝，高性能，无序列化开销）
+- **跨进程通信**：TaskScheduler和引擎插件通过EventBus通信（gRPC/Redis/Kafka，支持分布式部署）
+- **设计优势**：
+  - 高频数据源（如NRI监控）通过Channel避免网络和序列化开销
+  - 跨机器分布式部署通过EventBus实现组件解耦
+  - 可根据部署场景灵活选择通信方式
 
 ---
 
@@ -153,9 +162,183 @@ func (ds *DockerDataSource) Start() error {
 
 ---
 
+### 1.3 数据源与策略引擎交互流程
+
+在混合架构下，数据源和策略引擎在同一进程内，通过channel直接通信，无需经过EventBus。
+
+**交互流程**：
+1. DataSourceManager调用DataSource.Subscribe()获取数据源事件channel
+2. DataSourceManager订阅数据源事件channel
+3. DataSourceManager将事件通过内部channel转发给PolicyEngine
+4. PolicyEngine接收事件后调用MatchAll()进行策略匹配
+5. 匹配成功后，PolicyEngine通过EventBus发布PolicyMatched事件给TaskScheduler
+
+**实现示例**：
+```go
+// pkg/datasource/manager.go
+
+type DataSourceManagerImpl struct {
+    mu           sync.RWMutex
+    active       DataSource
+    eventCh      chan Event
+    policyEngine policy.PolicyEngine
+}
+
+func (m *DataSourceManagerImpl) Subscribe() <-chan Event {
+    return m.eventCh
+}
+
+func (m *DataSourceManagerImpl) Start() error {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+
+    if m.active == nil {
+        return fmt.Errorf("no active datasource")
+    }
+
+    // 启动数据源
+    if err := m.active.Start(); err != nil {
+        return err
+    }
+
+    // 订阅数据源事件
+    sourceCh := m.active.Subscribe()
+
+    // 启动事件转发goroutine
+    go func() {
+        for event := range sourceCh {
+            // 转发给策略引擎
+            if m.policyEngine != nil {
+                m.eventCh <- event
+            }
+        }
+    }()
+
+    return nil
+}
+
+func (m *DataSourceManagerImpl) SetPolicyEngine(pe policy.PolicyEngine) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    m.policyEngine = pe
+}
+```
+
+---
+
 ## 二、策略引擎具体实现
 
-### 2.1 libdslgo引擎实现
+### 2.1 PolicyEngine实现
+
+```go
+// pkg/policy/engine.go
+package policy
+
+import (
+    "sync"
+    "github.com/google/uuid"
+    "github.com/nuts-project/nuts/pkg/common"
+    "github.com/nuts-project/nuts/pkg/dsl"
+    "github.com/nuts-project/nuts/pkg/eventbus"
+)
+
+type PolicyEngineImpl struct {
+    mu         sync.RWMutex
+    policies   map[string]*Policy
+    dslEngine  dsl.DSLEngine
+    eventBus   eventbus.EventBus
+    eventCh    <-chan *common.Event
+    stopCh     chan struct{}
+}
+
+func NewPolicyEngine(dslEngine dsl.DSLEngine, eventBus eventbus.EventBus) *PolicyEngineImpl {
+    return &PolicyEngineImpl{
+        policies:  make(map[string]*Policy),
+        dslEngine: dslEngine,
+        eventBus:  eventBus,
+        stopCh:    make(chan struct{}),
+    }
+}
+
+// Subscribe 订阅数据源事件
+// 在混合架构下，通过channel接收DataSourceManager转发的事件
+func (e *PolicyEngineImpl) Subscribe(eventCh <-chan *common.Event) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
+    e.eventCh = eventCh
+
+    // 启动事件处理goroutine
+    go e.processEvents()
+}
+
+func (e *PolicyEngineImpl) processEvents() {
+    for {
+        select {
+        case event := <-e.eventCh:
+            // 匹配策略
+            results, err := e.MatchAll(event)
+            if err != nil {
+                log.Printf("MatchAll error: %v", err)
+                continue
+            }
+
+            // 发布匹配成功的事件
+            for _, result := range results {
+                if result.Matched {
+                    e.publishMatchedEvent(event, result)
+                }
+            }
+        case <-e.stopCh:
+            return
+        }
+    }
+}
+
+func (e *PolicyEngineImpl) publishMatchedEvent(event *common.Event, result *MatchResult) {
+    matchedEvent := &common.Event{
+        ID:        uuid.New().String(),
+        Type:      "PolicyMatched",
+        Topic:     "policy.matched",
+        Timestamp: time.Now(),
+        Payload: map[string]interface{}{
+            "original_event": event,
+            "policy_id":      result.PolicyID,
+            "task_config":    result.TaskConfig,
+        },
+    }
+
+    if err := e.eventBus.Publish("policy.matched", matchedEvent); err != nil {
+        log.Printf("Publish PolicyMatched event error: %v", err)
+    }
+}
+
+func (e *PolicyEngineImpl) MatchAll(event *common.Event) ([]*MatchResult, error) {
+    e.mu.RLock()
+    defer e.mu.RUnlock()
+
+    var results []*MatchResult
+    for _, policy := range e.policies {
+        matched, err := e.dslEngine.Evaluate(event.Payload)
+        if err != nil {
+            continue
+        }
+
+        results = append(results, &MatchResult{
+            PolicyID:   policy.ID,
+            Matched:    matched,
+            TaskConfig: policy.TaskConfig,
+        })
+    }
+
+    return results, nil
+}
+
+func (e *PolicyEngineImpl) Stop() {
+    close(e.stopCh)
+}
+```
+
+### 2.2 libdslgo引擎实现
 
 ```go
 // pkg/dsl/libdslgo/engine.go
@@ -627,6 +810,14 @@ func (f *DBFactory) Open(driver, dsn string) (DB, error) {
 EventBus采用中心化架构：
 - **服务端**：由TaskScheduler管理，负责事件路由和分发
 - **客户端**：其他模块（Collector、AggregationEngine等）作为客户端连接服务端
+
+**混合架构设计**：
+- **进程内通信**：DataSource和PolicyEngine在同一进程内，通过Go Channel直接通信（零拷贝，高性能，无序列化开销）
+- **跨进程通信**：TaskScheduler和引擎插件通过EventBus通信（gRPC/Redis/Kafka，支持分布式部署）
+- **设计优势**：
+  - 高频数据源（如NRI监控）通过Channel避免网络和序列化开销
+  - 跨机器分布式部署通过EventBus实现组件解耦
+  - 可根据部署场景灵活选择通信方式
 
 **部署模式**：
 - **单节点部署**：使用gRPC，TaskScheduler启动gRPC服务端
@@ -1131,6 +1322,9 @@ type DataSourceManager struct {
     dataSources    map[string]DataSource
     factories      map[string]DataSourceFactory
     eventBus       eventbus.EventBus
+    active         DataSource
+    eventCh        chan Event
+    policyEngine   policy.PolicyEngine
     mutex          sync.RWMutex
 }
 
@@ -1139,6 +1333,7 @@ func NewDataSourceManager(eventBus eventbus.EventBus) *DataSourceManager {
         dataSources: make(map[string]DataSource),
         factories:   make(map[string]DataSourceFactory),
         eventBus:    eventBus,
+        eventCh:     make(chan Event, 100),
     }
 }
 
@@ -1151,22 +1346,22 @@ func (m *DataSourceManager) RegisterFactory(name string, factory DataSourceFacto
 func (m *DataSourceManager) CreateDataSource(name string, config map[string]interface{}) error {
     m.mutex.Lock()
     defer m.mutex.Unlock()
-    
+
     dsType, ok := config["type"].(string)
     if !ok {
         return fmt.Errorf("datasource type is required")
     }
-    
+
     factory, ok := m.factories[dsType]
     if !ok {
         return fmt.Errorf("datasource factory not found: %s", dsType)
     }
-    
+
     ds, err := factory.Create(config)
     if err != nil {
         return err
     }
-    
+
     m.dataSources[name] = ds
     return nil
 }
@@ -1174,7 +1369,7 @@ func (m *DataSourceManager) CreateDataSource(name string, config map[string]inte
 func (m *DataSourceManager) GetDataSource(name string) (DataSource, error) {
     m.mutex.RLock()
     defer m.mutex.RUnlock()
-    
+
     ds, ok := m.dataSources[name]
     if !ok {
         return nil, fmt.Errorf("datasource not found: %s", name)
@@ -1182,10 +1377,83 @@ func (m *DataSourceManager) GetDataSource(name string) (DataSource, error) {
     return ds, nil
 }
 
+// SetActive 设置当前激活的数据源
+func (m *DataSourceManager) SetActive(name string, source DataSource) error {
+    m.mutex.Lock()
+    defer m.mutex.Unlock()
+    m.active = source
+    return nil
+}
+
+// GetActive 获取当前激活的数据源
+func (m *DataSourceManager) GetActive() (DataSource, error) {
+    m.mutex.RLock()
+    defer m.mutex.RUnlock()
+    if m.active == nil {
+        return nil, fmt.Errorf("no active datasource")
+    }
+    return m.active, nil
+}
+
+// Start 启动当前激活的数据源
+func (m *DataSourceManager) Start() error {
+    m.mutex.Lock()
+    defer m.mutex.Unlock()
+
+    if m.active == nil {
+        return fmt.Errorf("no active datasource")
+    }
+
+    // 启动数据源
+    if err := m.active.Start(); err != nil {
+        return err
+    }
+
+    // 订阅数据源事件
+    sourceCh := m.active.Subscribe()
+
+    // 启动事件转发goroutine
+    go func() {
+        for event := range sourceCh {
+            // 转发给策略引擎
+            if m.policyEngine != nil {
+                m.eventCh <- event
+            }
+        }
+    }()
+
+    return nil
+}
+
+// Stop 停止当前激活的数据源
+func (m *DataSourceManager) Stop() error {
+    m.mutex.Lock()
+    defer m.mutex.Unlock()
+
+    if m.active == nil {
+        return fmt.Errorf("no active datasource")
+    }
+
+    return m.active.Stop()
+}
+
+// Subscribe 订阅数据源事件
+// 在混合架构下，数据源和策略引擎在同一进程内，通过channel直接通信
+func (m *DataSourceManager) Subscribe() <-chan Event {
+    return m.eventCh
+}
+
+// SetPolicyEngine 设置策略引擎
+func (m *DataSourceManager) SetPolicyEngine(pe policy.PolicyEngine) {
+    m.mutex.Lock()
+    defer m.mutex.Unlock()
+    m.policyEngine = pe
+}
+
 func (m *DataSourceManager) StartAll() error {
     m.mutex.RLock()
     defer m.mutex.RUnlock()
-    
+
     for name, ds := range m.dataSources {
         if err := ds.Start(); err != nil {
             log.Printf("Failed to start datasource %s: %v", name, err)
@@ -1197,7 +1465,7 @@ func (m *DataSourceManager) StartAll() error {
 func (m *DataSourceManager) StopAll() error {
     m.mutex.RLock()
     defer m.mutex.RUnlock()
-    
+
     for name, ds := range m.dataSources {
         if err := ds.Stop(); err != nil {
             log.Printf("Failed to stop datasource %s: %v", name, err)
