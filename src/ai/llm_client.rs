@@ -29,7 +29,7 @@ impl LlmProvider {
         match self {
             LlmProvider::OpenAi => "https://api.openai.com/v1/chat/completions".to_string(),
             LlmProvider::Anthropic => "https://api.anthropic.com/v1/messages".to_string(),
-            LlmProvider::Local => "http://localhost:11434/api/generate".to_string(),
+            LlmProvider::Local => "http://localhost:11434/v1/chat/completions".to_string(), // OpenAI compatible endpoint
             LlmProvider::Custom => String::new(),
         }
     }
@@ -328,7 +328,276 @@ impl LlmClient for OpenAiClient {
     }
 }
 
-/// OpenAI API 响应结构
+/// Ollama 客户端（使用 OpenAI 兼容格式）
+pub struct OllamaClient {
+    config: LlmConfig,
+    client: reqwest::Client,
+}
+
+impl OllamaClient {
+    pub fn new(config: LlmConfig) -> Result<Self, LlmError> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(config.timeout_secs))
+            .build()
+            .map_err(|e| LlmError::non_retryable("CLIENT_BUILD_FAILED", &e.to_string()))?;
+
+        Ok(Self { config, client })
+    }
+
+    /// 快速创建本地 Ollama 客户端
+    pub fn local_default() -> Self {
+        let config = LlmConfig::for_provider(LlmProvider::Local);
+        Self::new(config).expect("Failed to create Ollama client")
+    }
+}
+
+#[async_trait]
+impl LlmClient for OllamaClient {
+    async fn chat_completion(&self, request: ChatCompletionRequest) -> Result<ChatCompletionResponse, LlmError> {
+        let request_body = serde_json::json!({
+            "model": request.model,
+            "messages": request.messages,
+            "temperature": request.temperature.unwrap_or(self.config.temperature),
+            "max_tokens": request.max_tokens.unwrap_or(self.config.max_tokens),
+        });
+
+        let mut request_builder = self.client
+            .post(&self.config.endpoint)
+            .header("Content-Type", "application/json")
+            .json(&request_body);
+
+        // Ollama 可选支持 API key（用于代理场景）
+        if let Some(ref api_key) = self.config.api_key {
+            request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request_builder
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    LlmError::retryable("TIMEOUT", &e.to_string())
+                } else {
+                    LlmError::retryable("REQUEST_FAILED", &e.to_string())
+                }
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(LlmError::non_retryable(
+                &format!("HTTP_{}", status.as_u16()),
+                &format!("Ollama API error: {}", error_text),
+            ));
+        }
+
+        // Ollama OpenAI 兼容格式响应与 OpenAI 相同
+        let openai_response: OpenAiResponse = response.json().await.map_err(|e| {
+            LlmError::non_retryable("PARSE_ERROR", &e.to_string())
+        })?;
+
+        let content = openai_response
+            .choices
+            .first()
+            .and_then(|c| c.message.content.clone())
+            .ok_or_else(|| LlmError::non_retryable("EMPTY_RESPONSE", "No content in response"))?;
+
+        Ok(ChatCompletionResponse {
+            id: openai_response.id,
+            model: openai_response.model,
+            content,
+            usage: openai_response.usage.map(|u| TokenUsage {
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
+            }),
+            finish_reason: openai_response.choices.first().and_then(|c| c.finish_reason.clone()),
+        })
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        // 发送一个简单的请求检查服务可用性
+        let request = ChatCompletionRequest {
+            model: self.config.model.clone(),
+            messages: vec![Message::system("Hi")],
+            temperature: Some(0.0),
+            max_tokens: Some(1),
+        };
+
+        match self.chat_completion(request).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.code.starts_with("HTTP_4") => {
+                // 4xx 错误通常是模型不存在，服务是可用的
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn config(&self) -> &LlmConfig {
+        &self.config
+    }
+}
+
+/// Anthropic Claude 客户端
+pub struct AnthropicClient {
+    config: LlmConfig,
+    client: reqwest::Client,
+}
+
+impl AnthropicClient {
+    pub fn new(config: LlmConfig) -> Result<Self, LlmError> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(config.timeout_secs))
+            .build()
+            .map_err(|e| LlmError::non_retryable("CLIENT_BUILD_FAILED", &e.to_string()))?;
+
+        Ok(Self { config, client })
+    }
+
+    /// 快速创建 Claude 客户端
+    pub fn claude(api_key: &str) -> Self {
+        let config = LlmConfig::for_provider(LlmProvider::Anthropic)
+            .with_api_key(api_key);
+        Self::new(config).expect("Failed to create Claude client")
+    }
+}
+
+#[async_trait]
+impl LlmClient for AnthropicClient {
+    async fn chat_completion(&self, request: ChatCompletionRequest) -> Result<ChatCompletionResponse, LlmError> {
+        // Anthropic 使用 x-api-key 头而非 Bearer token
+        let api_key = self.config.api_key.as_ref()
+            .ok_or_else(|| LlmError::non_retryable("MISSING_API_KEY", "Anthropic requires API key"))?;
+
+        // Anthropic 的消息格式与 OpenAI 类似，但 system 消息需要特殊处理
+        let mut messages = Vec::new();
+        let mut system_content: Option<String> = None;
+
+        for msg in &request.messages {
+            if msg.role == "system" {
+                system_content = Some(msg.content.clone());
+            } else {
+                messages.push(serde_json::json!({
+                    "role": msg.role,
+                    "content": msg.content
+                }));
+            }
+        }
+
+        // Anthropic 请求体
+        let mut request_body = serde_json::json!({
+            "model": request.model,
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(self.config.max_tokens),
+        });
+
+        // 添加 system 字段（如果有）
+        if let Some(sys) = system_content {
+            request_body["system"] = serde_json::json!(sys);
+        }
+
+        // 可选参数
+        if let Some(temp) = request.temperature {
+            request_body["temperature"] = serde_json::json!(temp);
+        }
+
+        let response = self.client
+            .post(&self.config.endpoint)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    LlmError::retryable("TIMEOUT", &e.to_string())
+                } else {
+                    LlmError::retryable("REQUEST_FAILED", &e.to_string())
+                }
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(LlmError::non_retryable(
+                &format!("HTTP_{}", status.as_u16()),
+                &format!("Anthropic API error: {}", error_text),
+            ));
+        }
+
+        // Anthropic 响应格式与 OpenAI 不同
+        let anthropic_response: AnthropicResponse = response.json().await.map_err(|e| {
+            LlmError::non_retryable("PARSE_ERROR", &e.to_string())
+        })?;
+
+        let content = anthropic_response
+            .content
+            .first()
+            .map(|c| c.text.clone())
+            .ok_or_else(|| LlmError::non_retryable("EMPTY_RESPONSE", "No content in response"))?;
+
+        Ok(ChatCompletionResponse {
+            id: anthropic_response.id,
+            model: anthropic_response.model,
+            content,
+            usage: anthropic_response.usage.map(|u| TokenUsage {
+                prompt_tokens: u.input_tokens,
+                completion_tokens: u.output_tokens,
+                total_tokens: u.input_tokens + u.output_tokens,
+            }),
+            finish_reason: anthropic_response.stop_reason,
+        })
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        let request = ChatCompletionRequest {
+            model: self.config.model.clone(),
+            messages: vec![Message::user("Hi")],
+            temperature: Some(0.0),
+            max_tokens: Some(1),
+        };
+
+        match self.chat_completion(request).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.code.starts_with("HTTP_4") => {
+                // 4xx 错误通常是认证或参数问题，服务是可用的
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn config(&self) -> &LlmConfig {
+        &self.config
+    }
+}
+
+/// Anthropic API 响应结构
+#[derive(Debug, Deserialize)]
+struct AnthropicResponse {
+    id: String,
+    model: String,
+    content: Vec<AnthropicContent>,
+    stop_reason: Option<String>,
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicUsage {
+    input_tokens: i32,
+    output_tokens: i32,
+}
+
+/// OpenAI API 响应结构（Ollama 兼容格式复用）
 #[derive(Debug, Deserialize)]
 struct OpenAiResponse {
     id: String,
@@ -368,12 +637,12 @@ impl LlmClientFactory {
                 Ok(Box::new(client))
             }
             LlmProvider::Anthropic => {
-                // TODO: 实现 Anthropic 客户端
-                Err(LlmError::non_retryable("NOT_IMPLEMENTED", "Anthropic client not yet implemented"))
+                let client = AnthropicClient::new(config)?;
+                Ok(Box::new(client))
             }
             LlmProvider::Local => {
-                // TODO: 实现 Ollama 客户端
-                Err(LlmError::non_retryable("NOT_IMPLEMENTED", "Local client not yet implemented"))
+                let client = OllamaClient::new(config)?;
+                Ok(Box::new(client))
             }
             LlmProvider::Custom => {
                 // 对于自定义端点，使用 OpenAI 兼容格式

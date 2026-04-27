@@ -9,7 +9,10 @@
 pub mod async_bridge;
 pub mod llm_client;
 
-use crate::types::diagnosis::{DiagnosisResult, Conclusion, Recommendation, AiStatus};
+// 重新导出常用类型（AiEnhancedDiagnosis 在本模块定义）
+pub use async_bridge::{AiResultStore, AiTask, AiTaskQueue};
+
+use crate::types::diagnosis::{DiagnosisResult, Recommendation, AiStatus};
 use crate::types::evidence::Evidence;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -104,35 +107,49 @@ pub struct AiOutput {
     pub suggested_commands: Vec<String>,
 }
 
-/// OpenAI Chat Completion 响应结构
+/// 聊天完成响应结构（支持 OpenAI 和本地模型格式）
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
-    id: String,
-    object: String,
-    created: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created: Option<i64>,
     model: String,
-    choices: Vec<ChatCompletionChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    choices: Option<Vec<ChatCompletionChoice>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<String>,  // 本地模型可能直接返回 output
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>, // 本地模型可能直接返回 content
+    #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<ChatCompletionUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatCompletionChoice {
-    index: i32,
-    message: ChatCompletionMessage,
+    index: Option<i32>,
+    message: Option<ChatCompletionMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatCompletionMessage {
-    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
     content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatCompletionUsage {
-    prompt_tokens: i32,
-    completion_tokens: i32,
-    total_tokens: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completion_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<i32>,
 }
 
 /// AI 增强后的诊断结果
@@ -148,6 +165,8 @@ pub struct AiEnhancedDiagnosis {
     pub ai_status: AiStatus,
     /// 处理耗时（毫秒）
     pub processing_ms: i64,
+    /// 创建时间戳（用于 TTL）
+    pub created_at: std::time::Instant,
 }
 
 impl AiAdapter {
@@ -295,35 +314,37 @@ impl AiAdapter {
     /// 调用 AI 服务（OpenAI 格式兼容）
     /// 
     /// 支持 OpenAI API 格式及兼容的 LLM 服务（如 vLLM、LocalAI 等）
+    /// 
+    /// 注意：本地模型（如 llama.cpp、text-generation-inference）
+    /// 通常不需要 API key，此时 api_key 应为 None
     pub async fn call_ai(&self, input: &AiInput) -> Result<AiOutput, AiError> {
-        // 检查配置
-        if self.config.api_key.is_none() {
-            return Err(AiError::HttpError("API key not configured".to_string()));
-        }
-
         // 构建 HTTP 客户端
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(self.config.timeout_secs))
             .build()
             .map_err(|e| AiError::HttpError(format!("Failed to create HTTP client: {}", e)))?;
 
-        // 构建请求体（OpenAI Chat Completion 格式）
+        // 构建请求体（本地模型格式 - input/system_prompt）
         let request_body = json!({
             "model": self.config.model,
-            "messages": [
-                {"role": "system", "content": &input.system_prompt},
-                {"role": "user", "content": &input.user_prompt}
-            ],
-            "temperature": 0.3,  // 降低随机性，提高诊断稳定性
-            "max_tokens": 2000,   // 限制输出长度
+            "system_prompt": &input.system_prompt,
+            "input": &input.user_prompt,
+            "temperature": 0.3,
         });
 
-        // 发送请求
-        let response = client
+        // 构建请求（本地模型不需要 API key）
+        let mut request_builder = client
             .post(&self.config.endpoint)
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.config.api_key.as_ref().unwrap()))
-            .json(&request_body)
+            .json(&request_body);
+        
+        // 如果配置了 API key，添加认证头
+        if let Some(ref api_key) = self.config.api_key {
+            request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        // 发送请求
+        let response = request_builder
             .send()
             .await
             .map_err(|e| {
@@ -350,15 +371,22 @@ impl AiAdapter {
             .await
             .map_err(|e| AiError::SerializationError(format!("Failed to parse response: {}", e)))?;
 
-        // 提取 AI 回复内容
+        // 提取 AI 回复内容（支持多种响应格式）
         let content = chat_response
-            .choices
-            .first()
-            .and_then(|c| c.message.content.as_ref())
+            .output  // 本地模型格式：直接返回 output
+            .or(chat_response.content)  // 或者 content 字段
+            .or_else(|| {
+                // OpenAI 格式：从 choices[0].message.content 提取
+                chat_response.choices.as_ref().and_then(|choices| {
+                    choices.first().and_then(|c| {
+                        c.message.as_ref().and_then(|m| m.content.clone())
+                    })
+                })
+            })
             .ok_or_else(|| AiError::InvalidResponse("Empty response from AI".to_string()))?;
 
         // 解析 JSON 格式的 AI 输出
-        let ai_output: AiOutput = serde_json::from_str(content)
+        let ai_output: AiOutput = serde_json::from_str(&content)
             .map_err(|e| AiError::InvalidResponse(format!(
                 "AI response is not valid JSON: {}. Raw content: {}",
                 e, content
@@ -423,19 +451,6 @@ impl AiAdapter {
     pub async fn process(&self, diagnosis: &DiagnosisResult, evidences: &[Evidence]) -> AiEnhancedDiagnosis {
         let start = chrono::Utc::now().timestamp_millis();
 
-        // 检查 AI 是否可用
-        if self.config.api_key.is_none() && self.config.endpoint.contains("localhost") {
-            // 降级：AI 不可用
-            let processing_ms = chrono::Utc::now().timestamp_millis() - start;
-            return AiEnhancedDiagnosis {
-                original: diagnosis.clone(),
-                ai_output: None,
-                enhanced: diagnosis.clone(),
-                ai_status: AiStatus::Unavailable,
-                processing_ms,
-            };
-        }
-
         // 构建输入
         let input = self.build_input(diagnosis, evidences);
 
@@ -452,6 +467,7 @@ impl AiAdapter {
                     enhanced,
                     ai_status: AiStatus::Ok,
                     processing_ms,
+                    created_at: std::time::Instant::now(),
                 }
             }
             Err(_) => {
@@ -465,6 +481,7 @@ impl AiAdapter {
                     enhanced,
                     ai_status: AiStatus::Unavailable,
                     processing_ms,
+                    created_at: std::time::Instant::now(),
                 }
             }
         }
@@ -519,7 +536,9 @@ impl std::error::Error for AiError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::evidence::{PodInfo, TimeWindow, Scope, Attribution, CollectionMeta, Selection};
+    use crate::types::diagnosis::Conclusion;
+    use crate::types::evidence::{PodInfo, TimeWindow, Scope, Attribution, CollectionMeta};
+    use crate::types::diagnosis::EvidenceStrength;
 
     fn create_test_evidence() -> Evidence {
         Evidence {

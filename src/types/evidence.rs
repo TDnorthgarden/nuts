@@ -49,7 +49,7 @@ pub struct TimeWindow {
     pub collection_interval_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Scope {
     #[serde(default)]
     pub pod: Option<PodInfo>,
@@ -59,6 +59,7 @@ pub struct Scope {
     pub cgroup_id: Option<String>,
     #[serde(default)]
     pub pid_scope: Option<PidScope>,
+    #[serde(default)]
     pub scope_key: String,
     #[serde(default)]
     pub network_target: Option<NetworkTarget>,
@@ -118,8 +119,9 @@ pub struct TopCall {
     pub p99_latency_ms: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Attribution {
+    #[serde(default)]
     pub status: String,
     #[serde(default)]
     pub confidence: Option<f64>,

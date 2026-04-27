@@ -20,6 +20,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::http;
 use tokio::net::UnixListener;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
@@ -269,12 +270,20 @@ impl Collector for CollectorService {
     }
 
     /// 权限检查
+    /// 
+    /// 客户端主动上报 UID 进行权限验证。
+    /// 注意：真正的 Unix Socket 层 UID 验证应在连接层实现（TODO）。
     async fn check_permission(
         &self,
         request: Request<PermissionCheckRequest>,
     ) -> Result<Response<PermissionCheckResponse>, Status> {
         let uid = request.into_inner().uid;
         let allowed = self.config.allowed_uids.contains(&uid);
+        
+        info!(
+            "[Auth] Permission check from UID {}, allowed: {}, allowed_list: {:?}",
+            uid, allowed, self.config.allowed_uids
+        );
         
         let message = if allowed {
             format!("UID {} is allowed to use collector", uid)
@@ -320,7 +329,7 @@ impl CollectorService {
     async fn run_bpftrace(
         &self,
         req: &CollectRequest,
-        collection_id: &str,
+        _collection_id: &str,
         duration_secs: u64,
     ) -> Result<(String, u32), (String, String)> {
         let script_path = &req.script_path;
@@ -481,12 +490,90 @@ async fn create_secure_socket(path: &str) -> std::io::Result<UnixListener> {
 }
 
 /// 验证 UID 是否有权限（通过 Unix Socket credentials）
+/// 
+/// 使用 Linux 的 SO_PEERCRED 选项获取连接对端的 UID。
+/// 这是 Unix Socket 的原生身份验证机制，无法被伪造。
+/// 
+/// TODO: 在 tonic gRPC 层集成此验证（需要自定义 Connection/Accept 逻辑）
 fn get_peer_uid(stream: &tokio::net::UnixStream) -> std::io::Result<u32> {
     use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
     
     let creds = getsockopt(stream, PeerCredentials)?;
     Ok(creds.uid())
 }
+
+/// 权限验证拦截器
+#[derive(Clone)]
+#[allow(dead_code)]
+struct AuthInterceptor {
+    allowed_uids: Arc<Vec<u32>>,
+}
+
+impl AuthInterceptor {
+    fn new(allowed_uids: Vec<u32>) -> Self {
+        Self {
+            allowed_uids: Arc::new(allowed_uids),
+        }
+    }
+}
+
+impl<B> tower::Service<http::Request<B>> for AuthInterceptor
+where
+    B: Send + 'static,
+{
+    type Response = http::Response<tonic::body::BoxBody>;
+    type Error = tonic::Status;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: http::Request<B>) -> Self::Future {
+        let allowed_uids = Arc::clone(&self.allowed_uids);
+        
+        Box::pin(async move {
+            // 从请求扩展中获取 peer UID（由 tonic 的 Unix Socket 连接器设置）
+            let peer_uid = req
+                .extensions()
+                .get::<PeerUid>()
+                .map(|uid| uid.0);
+            
+            match peer_uid {
+                Some(uid) => {
+                    if allowed_uids.contains(&uid) {
+                        tracing::debug!("UID {} authorized for gRPC call", uid);
+                        // 继续处理请求
+                        Err(tonic::Status::unimplemented("Request passed auth, continue to handler"))
+                    } else {
+                        tracing::warn!("UID {} not in allowed list: {:?}", uid, allowed_uids);
+                        Err(tonic::Status::permission_denied(format!(
+                            "UID {} not authorized. Allowed: {:?}",
+                            uid, allowed_uids
+                        )))
+                    }
+                }
+                None => {
+                    // 非 Unix Socket 连接或无法获取 UID
+                    tracing::warn!("Could not determine peer UID for gRPC call");
+                    Err(tonic::Status::unauthenticated(
+                        "Unable to verify caller identity via Unix Socket credentials"
+                    ))
+                }
+            }
+        })
+    }
+}
+
+/// Peer UID 包装类型（用于请求扩展）
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+struct PeerUid(u32);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

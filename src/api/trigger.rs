@@ -1,7 +1,8 @@
-use axum::{extract::Json, routing::post, Router};
+use axum::{extract::{Json, State}, routing::post, Router};
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::ai::async_bridge::{AiTaskQueue, AiTask, AiTaskPriority};
 use crate::collector::block_io::{run_block_io_collect_poc, BlockIoCollectorConfig};
 use crate::collector::cgroup_contention::{run_cgroup_contention_collect_poc, CgroupContentionConfig};
 use crate::collector::network::{run_network_collect_poc, NetworkCollectorConfig};
@@ -10,7 +11,9 @@ use crate::collector::syscall_latency::{run_syscall_collect_poc, SyscallCollecto
 use crate::collector::fs_stall::{run_fs_stall_collect_poc, FsStallCollectorConfig};
 use crate::diagnosis::engine::RuleEngine;
 use crate::publisher::ResultPublisher;
+use crate::types::diagnosis::{DiagnosisResult, Conclusion, EvidenceStrength, DiagnosisStatus, Traceability};
 use crate::types::evidence::{NetworkTarget, PodInfo, TimeWindow, Evidence};
+use serde_json::json;
 
 #[derive(Debug, Deserialize)]
 pub struct TriggerRequest {
@@ -43,13 +46,24 @@ pub struct CollectionOptions {
     pub requested_evidence_types: Option<Vec<String>>,
     pub requested_metrics_by_type: Option<serde_json::Map<String, serde_json::Value>>,
     pub requested_events_by_type: Option<serde_json::Map<String, serde_json::Value>>,
+    /// 目标 PID 列表（BPFtrace 采集时进行 PID 过滤）
+    pub target_pids: Option<Vec<u32>>,
 }
 
-pub fn router() -> Router {
-    Router::new().route("/v1/diagnostics:trigger", post(trigger_handler))
+/// 创建触发器路由
+/// 
+/// 需要传入共享的 NriMappingTable 用于证据采集
+/// 可选传入 AI 任务队列用于异步 AI 增强
+pub fn router(nri_table: Arc<NriMappingTable>, ai_queue: Option<Arc<AiTaskQueue>>) -> Router {
+    Router::new()
+        .route("/v1/diagnostics:trigger", post(trigger_handler))
+        .with_state((nri_table, ai_queue))
 }
 
-async fn trigger_handler(Json(req): Json<TriggerRequest>) -> Json<serde_json::Value> {
+async fn trigger_handler(
+    State((nri_table, ai_queue)): State<(Arc<NriMappingTable>, Option<Arc<AiTaskQueue>>)>,
+    Json(req): Json<TriggerRequest>
+) -> Json<serde_json::Value> {
     let task_id = uuid::Uuid::new_v4().to_string();
     let start_time = chrono::Utc::now().timestamp_millis();
 
@@ -61,8 +75,8 @@ async fn trigger_handler(Json(req): Json<TriggerRequest>) -> Json<serde_json::Va
 
     let mut evidences: Vec<Evidence> = Vec::new();
 
-    // TODO: 接入真实的 NRI 映射表（可通过全局状态或依赖注入传递）
-    let nri_table: Option<Arc<NriMappingTable>> = None;
+    // NRI 映射表已接入：通过 axum State 从全局状态传入
+    let nri_table: Option<Arc<NriMappingTable>> = Some(nri_table);
 
     // 采集 network 证据
     if evidence_types.contains(&"network".to_string()) {
@@ -84,6 +98,7 @@ async fn trigger_handler(Json(req): Json<TriggerRequest>) -> Json<serde_json::Va
             requested_metrics: extract_string_list(&req.collection_options, "network", "requested_metrics_by_type"),
             requested_events: extract_string_list(&req.collection_options, "network", "requested_events_by_type"),
             nri_table: nri_table.clone(),
+            target_pids: req.collection_options.as_ref().and_then(|o| o.target_pids.clone()),
         };
 
         let evidence = run_network_collect_poc(network_cfg);
@@ -109,6 +124,7 @@ async fn trigger_handler(Json(req): Json<TriggerRequest>) -> Json<serde_json::Va
             requested_metrics: extract_string_list(&req.collection_options, "block_io", "requested_metrics_by_type"),
             requested_events: extract_string_list(&req.collection_options, "block_io", "requested_events_by_type"),
             nri_table: nri_table.clone(),
+            target_pids: req.collection_options.as_ref().and_then(|o| o.target_pids.clone()),
         };
 
         let evidence = run_block_io_collect_poc(block_io_cfg);
@@ -207,6 +223,22 @@ async fn trigger_handler(Json(req): Json<TriggerRequest>) -> Json<serde_json::Va
         tracing::warn!("Failed to publish diagnosis: {:?}", e);
     }
     let _payload = publisher.generate_alert_payload(&diagnosis);
+
+    // 提交 AI 增强任务（异步处理）
+    if let Some(ref queue) = ai_queue {
+        let ai_task = AiTask::new(
+            task_id.clone(),
+            diagnosis.clone(),
+            evidences.clone(),
+            AiTaskPriority::Normal,
+        );
+        match queue.submit(ai_task).await {
+            Ok(_) => tracing::info!("[Trigger] AI enhancement task submitted: {}", task_id),
+            Err(e) => tracing::warn!("[Trigger] Failed to submit AI task: {}", e),
+        }
+    } else {
+        tracing::debug!("[Trigger] AI enhancement skipped (queue not available)");
+    }
 
     let end_time = chrono::Utc::now().timestamp_millis();
     let duration_ms = end_time - start_time;

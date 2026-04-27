@@ -12,11 +12,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::BufRead;
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
-use std::process::Command;
 
 /// cgroup 资源争抢采集配置
 pub struct CgroupContentionConfig {
@@ -289,7 +287,7 @@ fn read_io_stats(cgroup_path: &Path) -> Option<IoContentionStats> {
 
     let content = fs::read_to_string(&io_stat_path).ok()?;
     let mut io_wait_time = 0u64;
-    let mut io_service_time = 0u64;
+    let io_service_time = 0u64;
 
     for line in content.lines() {
         // 格式: "8:0 rbytes=... wbytes=... rios=... wios=... dbytes=... dios=..."
@@ -445,7 +443,7 @@ pub async fn run_cgroup_contention_collect(
     let io_stats = cgroup_path.as_ref().and_then(|p| read_io_stats(p));
 
     // 计算争抢评分
-    let (contention_score, primary_type) = calculate_contention_score(&cpu_stats, &memory_stats, &io_stats);
+    let (contention_score, _primary_type) = calculate_contention_score(&cpu_stats, &memory_stats, &io_stats);
 
     // 构建归属信息
     let has_cgroup = cfg.cgroup_id.is_some();
@@ -591,7 +589,7 @@ pub async fn run_cgroup_contention_collect_poc(
     let cpu_opt = Some(cpu_stats.clone());
     let memory_opt = Some(memory_stats.clone());
     let io_opt = Some(io_stats.clone());
-    let (contention_score, primary_type) = calculate_contention_score(&cpu_opt, &memory_opt, &io_opt);
+    let (contention_score, _primary_type) = calculate_contention_score(&cpu_opt, &memory_opt, &io_opt);
 
     // 查询 NRI 映射表获取归属信息
     let attribution_info = if let Some(ref table) = cfg.nri_table {

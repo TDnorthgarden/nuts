@@ -449,6 +449,60 @@ impl From<serde_yaml::Error> for ConfigError {
     }
 }
 
+impl Config {
+    /// 从文件重新加载配置（用于 SIGHUP 热重载）
+    pub fn reload(&mut self) -> Result<(), ConfigError> {
+        // 尝试从多个路径加载配置文件
+        let config_paths = vec![
+            "nuts.yaml",
+            "/etc/nuts/config.yaml",
+            "config/nuts.yaml",
+        ];
+
+        for path in &config_paths {
+            if std::path::Path::new(path).exists() {
+                let content = std::fs::read_to_string(path)?;
+                let new_config: Config = serde_yaml::from_str(&content)?;
+                
+                // 更新当前配置（保留一些运行时状态）
+                *self = new_config;
+                
+                tracing::info!("Configuration reloaded from: {}", path);
+                return Ok(());
+            }
+        }
+
+        // 如果没有找到配置文件，检查环境变量
+        if let Ok(config_path) = std::env::var("NUTS_CONFIG") {
+            if std::path::Path::new(&config_path).exists() {
+                let content = std::fs::read_to_string(&config_path)?;
+                let new_config: Config = serde_yaml::from_str(&content)?;
+                
+                *self = new_config;
+                
+                tracing::info!("Configuration reloaded from NUTS_CONFIG: {}", config_path);
+                return Ok(());
+            }
+        }
+
+        Err(ConfigError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No config file found for reload"
+        )))
+    }
+
+    /// 获取可热重载的配置摘要
+    pub fn reload_summary(&self) -> String {
+        format!(
+            "Server port: {}, AI enabled: {}, Alert enabled: {}, {} condition triggers",
+            self.server.port,
+            self.ai.enabled,
+            self.alert.enabled,
+            self.condition_triggers.len()
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

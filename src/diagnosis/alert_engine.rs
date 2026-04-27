@@ -252,7 +252,7 @@ impl AlertRuleEngine {
         let suggestion = self.generate_suggestion(rule, diagnosis);
         
         // 提取 pod 信息（从第一个结论的 references 中）
-        let pod_info = diagnosis.traceability.references.first()
+        let _pod_info = diagnosis.traceability.references.first()
             .and_then(|r| r.reasoning_summary.as_ref())
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
@@ -534,8 +534,11 @@ mod tests {
                     confidence: 0.92,
                     evidence_strength: crate::types::diagnosis::EvidenceStrength::High,
                     severity: Some(2),
-                    details: None,
-                },
+                    details: Some(serde_json::json!({
+                        "description": "CPU资源争抢严重",
+                        "conclusion_type": "manual"
+                    })),
+                    },
             ],
             recommendations: vec![],
             traceability: crate::types::diagnosis::Traceability {

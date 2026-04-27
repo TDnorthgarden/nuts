@@ -137,6 +137,9 @@ pub struct BpftraceCollectionConfig {
     /// 指标黑名单（不采集这些指标，空=不过滤）
     #[serde(default)]
     pub metric_blacklist: Vec<String>,
+    /// 目标 PID 列表（仅采集这些进程的事件，空=不过滤）
+    #[serde(default)]
+    pub target_pids: Vec<u32>,
 }
 
 fn default_use_sudo() -> bool { true }
@@ -151,6 +154,7 @@ impl Default for BpftraceCollectionConfig {
             use_sudo: true,
             metric_whitelist: Vec::new(),
             metric_blacklist: Vec::new(),
+            target_pids: Vec::new(),
         }
     }
 }
@@ -313,8 +317,15 @@ impl BpftraceAdapter {
         };
 
         cmd.arg(&self.config.script_path)
-            .args(&self.config.extra_args)
-            .stdout(Stdio::piped())
+            .args(&self.config.extra_args);
+        
+        // 添加目标 PID 过滤（如果指定了 target_pids）
+        // bpftrace 支持 -p PID 参数进行进程过滤
+        for pid in &self.config.target_pids {
+            cmd.arg("-p").arg(pid.to_string());
+        }
+        
+        cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
         cmd.spawn().map_err(|e| BpftraceAdapterError::ScriptLoadFailed {
@@ -565,6 +576,7 @@ pub fn collect_network(script_path: &str, duration_sec: u64) -> BpftraceCollecti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_field_mapping_default() {

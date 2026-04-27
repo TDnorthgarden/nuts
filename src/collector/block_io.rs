@@ -19,6 +19,8 @@ pub struct BlockIoCollectorConfig {
     pub requested_events: Vec<String>,
     /// NRI 映射表引用，用于查询归属
     pub nri_table: Option<Arc<NriMappingTable>>,
+    /// 目标 PID 列表（BPFtrace 采集时进行 PID 过滤）
+    pub target_pids: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -77,9 +79,20 @@ pub fn run_block_io_collect_poc(cfg: BlockIoCollectorConfig) -> Evidence {
     let latencies_clone = latencies.clone();
     let events_clone = events.clone();
     
+    // 构建 bpftrace 命令
+    let mut cmd = Command::new("sudo");
+    cmd.arg("bpftrace").arg(script_path);
+    
+    // 添加目标 PID 过滤（如果指定了）
+    // bpftrace 支持 -p PID 参数进行进程过滤
+    if let Some(ref pids) = cfg.target_pids {
+        for pid in pids {
+            cmd.arg("-p").arg(pid.to_string());
+        }
+    }
+    
     // 启动 bpftrace 采集
-    let mut child = match Command::new("sudo")
-        .args(["bpftrace", script_path])
+    let mut child = match cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -195,7 +208,7 @@ fn build_evidence(
     bytes_total: u64,
     io_count: u64,
     timeout_count: u64,
-    _raw_events: Vec<BpftraceBlockIoEvent>,
+    raw_events: Vec<BpftraceBlockIoEvent>,
     errors: Vec<CollectionError>,
     collection_status: &str,
 ) -> Evidence {
@@ -297,13 +310,30 @@ fn build_evidence(
     // 保存 cgroup_id 存在状态（用于后续 fallback）
     let has_cgroup_id = cfg.cgroup_id.is_some();
     
+    // 从 bpftrace 事件中提取唯一 PID 列表
+    let collected_pids: Vec<u32> = raw_events
+        .iter()
+        .filter_map(|e| e.pid)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    
     // 查询 NRI 映射表获取归属信息
     let attribution_info = if let Some(ref table) = cfg.nri_table {
-        // 尝试通过 pod/cgroup/pid 查询归属
         let pod_uid = cfg.pod.as_ref().and_then(|p| p.uid.as_deref());
         let cgroup_id = cfg.cgroup_id.as_deref();
-        // TODO: 从 bpftrace 事件中获得实际采集到的 PID 进行查询
-        table.resolve_attribution(pod_uid, cgroup_id, None).ok()
+        
+        // 优先使用 bpftrace 采集到的实际 PID 进行查询
+        let pid_result = if !collected_pids.is_empty() {
+            collected_pids.iter()
+                .filter_map(|&pid| table.resolve_attribution(pod_uid, cgroup_id, Some(pid)).ok())
+                .next()
+        } else {
+            None
+        };
+        
+        // 如果 PID 查询失败，回退到仅使用 cgroup/pod 查询
+        pid_result.or_else(|| table.resolve_attribution(pod_uid, cgroup_id, None).ok())
     } else {
         None
     };

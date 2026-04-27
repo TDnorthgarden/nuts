@@ -1,6 +1,7 @@
 //! Collector Client - 连接到特权采集守护进程
 //!
 //! 为非特权的 nuts-observer 提供访问 collector daemon 的接口。
+//! 使用 gRPC over Unix Socket 进行通信。
 //! 
 //! 注意: 当前版本使用开发模式（直接执行），gRPC over Unix Socket 功能待完善
 
@@ -9,6 +10,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 // 引入生成的 protobuf 代码用于类型定义
+#[cfg(feature = "nri-grpc")]
 use crate::collector::proto;
 
 /// 采集器客户端错误
@@ -115,6 +117,7 @@ impl CollectorClient {
     }
 
     /// 健康检查
+    #[cfg(feature = "nri-grpc")]
     pub async fn health(&mut self, _include_stats: bool) -> Result<proto::HealthResponse, CollectorClientError> {
         Ok(proto::HealthResponse {
             healthy: self.connected,
@@ -128,6 +131,7 @@ impl CollectorClient {
     }
 
     /// 检查当前 UID 的权限
+    #[cfg(feature = "nri-grpc")]
     pub async fn check_permission(&mut self, uid: u32) -> Result<proto::PermissionCheckResponse, CollectorClientError> {
         Ok(proto::PermissionCheckResponse {
             allowed: uid == 0 || uid == 1000,

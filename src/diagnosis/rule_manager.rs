@@ -4,7 +4,7 @@
 //! 支持通过 HTTP API 和 CLI 进行规则管理
 
 use crate::config::ThresholdRuleDef;
-use crate::diagnosis::engine::{RuleEngine, ThresholdRule, ThresholdOperator, Rule};
+use crate::diagnosis::engine::{RuleEngine, ThresholdRule, ThresholdOperator};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

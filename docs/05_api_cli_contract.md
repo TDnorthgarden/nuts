@@ -2,6 +2,8 @@
 
 > 目标：把“手动触发端到端跑通”所需的接口/字段一次性定清，避免后续采集与输出联调返工。
 
+> **更新**: 新增 NRI V3 高性能 API 端点（参见第 4 节）
+
 ## 1. 诊断触发（Trigger）
 
 ### 1.1 API（规划）
@@ -28,6 +30,71 @@
 - `collection_options`: object（可选）
   - `sample_rate`: number（可选）
   - `max_traces`: number（可选）
+
+## 4. NRI V3 高性能 API（新增）
+
+NRI V3 提供基于 DashMap 的高性能 API 端点，支持并发读写和批量事件处理。
+
+### 4.1 端点列表
+
+| 方法 | 路径 | 功能 | 性能特性 |
+|:-----|:-----|:-----|:---------|
+| GET | `/api/v3/nri/status` | 获取 V3 状态统计 | O(1) 原子计数 |
+| GET | `/api/v3/nri/pod` | 查询 Pod 详情 | DashMap 无锁查询 |
+| POST | `/api/v3/nri/batch` | 批量提交事件 | 多线程批量处理 |
+
+### 4.2 请求/响应示例
+
+**GET /api/v3/nri/status**
+
+响应：
+```json
+{
+  "version": "3.0.0-optimized",
+  "features": ["dashmap-concurrent", "batch-processing", "version-control"],
+  "pod_count": 150,
+  "container_count": 420,
+  "cgroup_count": 380,
+  "pid_count": 1250
+}
+```
+
+**POST /api/v3/nri/batch**
+
+请求：
+```json
+{
+  "events": [{
+    "pod_uid": "pod-abc-123",
+    "pod_name": "nginx-pod",
+    "namespace": "default",
+    "containers": [{
+      "container_id": "container-xyz",
+      "cgroup_ids": ["/sys/fs/cgroup/..."],
+      "pids": [12345, 12346]
+    }]
+  }]
+}
+```
+
+响应：
+```json
+{
+  "submitted": 1,
+  "failed": 0,
+  "errors": []
+}
+```
+
+### 4.3 V1 vs V3 对比
+
+| 特性 | V1 | V3 | 适用场景 |
+|:-----|:---|:---|:---------|
+| 并发性能 | RwLock 串行 | DashMap 并行 | 高并发场景 |
+| 批量处理 | 单事件 | 多线程批量 | 高频事件 |
+| 版本控制 | 无 | CAS 原子操作 | 防竞争 |
+| 持久化 | 内存 | sled 可选 | 生产环境 |
+| API 路径 | `/api/v1/*` | `/api/v3/*` | 逐步迁移 |
   - `requested_evidence_types`: string[]（可选：用户指定需要采集的 evidence 类型，如 `network`/`block_io`）
   - `requested_metrics_by_type`: object（可选：按 evidence_type 指定需要采集的 metric 列表）
     - key: `evidence_type`，value: string[]（例如 `{"network":["loss_rate","latency_p99_ms"],"block_io":["io_latency_p99_ms"]}`）

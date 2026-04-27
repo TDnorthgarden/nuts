@@ -182,6 +182,19 @@ impl AiResultStore {
         results.get(task_id).cloned()
     }
     
+    /// 列出所有 AI 增强结果（用于 API 查询）
+    pub async fn list_all(&self) -> Vec<(String, AiEnhancedDiagnosis)> {
+        let results = self.results.read().await;
+        results.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+    
+    /// 获取内部结果存储的引用（用于诊断 API）
+    pub fn get_results_ref(&self) -> Arc<RwLock<HashMap<String, AiEnhancedDiagnosis>>> {
+        Arc::clone(&self.results)
+    }
+    
     /// 获取带AI信息的最新诊断（用于API查询）
     pub async fn get_enhanced_diagnosis(&self, original: &DiagnosisResult) -> DiagnosisResult {
         match self.get(&original.task_id).await {
@@ -251,12 +264,23 @@ impl Default for AiWorkerConfig {
 }
 
 /// AI Worker - 后台任务处理器
+/// AI 任务完成通知消息
+#[derive(Debug, Clone)]
+pub struct AiCompletionNotification {
+    pub task_id: String,
+    pub diagnosis_id: String,
+    pub status: String,
+    pub completed_at_ms: i64,
+}
+
 pub struct AiWorker {
     config: AiWorkerConfig,
     adapter: AiAdapter,
     queue_rx: mpsc::Receiver<AiTask>,
     result_store: Arc<AiResultStore>,
     queue_state: Arc<RwLock<HashMap<String, AiTaskState>>>,
+    /// 增量 Publisher 通知发送器
+    notification_tx: Option<mpsc::Sender<AiCompletionNotification>>,
 }
 
 impl AiWorker {
@@ -265,6 +289,7 @@ impl AiWorker {
         queue_rx: mpsc::Receiver<AiTask>,
         result_store: Arc<AiResultStore>,
         queue_state: Arc<RwLock<HashMap<String, AiTaskState>>>,
+        notification_tx: Option<mpsc::Sender<AiCompletionNotification>>,
     ) -> Self {
         let adapter = AiAdapter::new(config.adapter_config.clone());
         
@@ -274,6 +299,25 @@ impl AiWorker {
             queue_rx,
             result_store,
             queue_state,
+            notification_tx,
+        }
+    }
+    
+    /// 发送增量通知给 Publisher
+    async fn notify_completion(&self, task_id: &str, diagnosis_id: &str, status: &str) {
+        if let Some(ref tx) = self.notification_tx {
+            let notification = AiCompletionNotification {
+                task_id: task_id.to_string(),
+                diagnosis_id: diagnosis_id.to_string(),
+                status: status.to_string(),
+                completed_at_ms: chrono::Utc::now().timestamp_millis(),
+            };
+            
+            if let Err(e) = tx.send(notification).await {
+                tracing::warn!("[AI Worker] Failed to send completion notification: {}", e);
+            } else {
+                tracing::info!("[AI Worker] Notified publisher of completion for task {}", task_id);
+            }
         }
     }
     
@@ -294,9 +338,11 @@ impl AiWorker {
                     let queue_state = Arc::clone(&self.queue_state);
                     let retry_limit = self.config.retry_limit;
                     
+                    let notification_tx = self.notification_tx.clone();
+                    
                     tokio::spawn(async move {
                         let _permit = permit; // 持有到任务完成
-                        Self::process_task(task, adapter, store, queue_state, retry_limit).await;
+                        Self::process_task(task, adapter, store, queue_state, retry_limit, notification_tx).await;
                     });
                 }
                 
@@ -321,6 +367,7 @@ impl AiWorker {
         store: Arc<AiResultStore>,
         queue_state: Arc<RwLock<HashMap<String, AiTaskState>>>,
         retry_limit: u32,
+        notification_tx: Option<mpsc::Sender<AiCompletionNotification>>,
     ) {
         let task_id = task.task_id.clone();
         let started_at_ms = chrono::Utc::now().timestamp_millis();
@@ -353,6 +400,7 @@ impl AiWorker {
                     enhanced,
                     ai_status: AiStatus::Ok,
                     processing_ms,
+                    created_at: std::time::Instant::now(),
                 };
                 
                 // 存储结果
@@ -366,7 +414,18 @@ impl AiWorker {
                 
                 tracing::info!("[AI Worker] Task {} completed in {}ms", task_id, processing_ms);
                 
-                // TODO: 触发增量Publisher（通过channel通知主线程）
+                // 触发增量 Publisher 通知
+                if let Some(ref tx) = notification_tx {
+                    let notification = AiCompletionNotification {
+                        task_id: task_id.clone(),
+                        diagnosis_id: task_id.clone(), // 使用 task_id 作为 diagnosis_id
+                        status: "completed".to_string(),
+                        completed_at_ms: chrono::Utc::now().timestamp_millis(),
+                    };
+                    if let Err(e) = tx.send(notification).await {
+                        tracing::warn!("[AI Worker] Failed to send notification: {}", e);
+                    }
+                }
             }
             
             Err(e) => {
@@ -393,6 +452,7 @@ impl AiWorker {
                         enhanced: fallback,
                         ai_status: AiStatus::Unavailable,
                         processing_ms,
+                        created_at: std::time::Instant::now(),
                     };
                     
                     store.store(&task_id, result.clone()).await;
@@ -414,14 +474,43 @@ impl AiWorker {
 }
 
 /// 便捷函数：启动AI异步系统
+/// 
+/// 返回：任务队列、结果存储、任务接收器、通知接收器
 pub fn start_ai_system(
     _config: AiWorkerConfig,
-) -> (AiTaskQueue, Arc<AiResultStore>, mpsc::Receiver<AiTask>) {
+) -> (AiTaskQueue, Arc<AiResultStore>, mpsc::Receiver<AiTask>, mpsc::Receiver<AiCompletionNotification>) {
     let (queue, rx) = AiTaskQueue::new(1000); // 队列容量1000
     let store = Arc::new(AiResultStore::new());
     let _queue_state = queue.get_pending_tasks();
     
-    (queue, store, rx)
+    // 创建通知通道（容量100，避免通知丢失）
+    let (_notif_tx, notif_rx) = mpsc::channel(100);
+    
+    // 将通知发送器附加到队列（供 Worker 使用）
+    // 注意：实际 Worker 创建时需要通过 queue_state 获取
+    // 这里仅创建通道，Worker 创建时传入发送端
+    
+    (queue, store, rx, notif_rx)
+}
+
+/// 启动AI Worker（带通知功能）
+/// 
+/// 此函数创建并启动一个AI Worker，支持向主线程发送完成通知
+pub async fn run_ai_worker_with_notifications(
+    config: AiWorkerConfig,
+    queue_rx: mpsc::Receiver<AiTask>,
+    result_store: Arc<AiResultStore>,
+    notification_tx: Option<mpsc::Sender<AiCompletionNotification>>,
+) {
+    let queue_state = Arc::new(RwLock::new(HashMap::new()));
+    let worker = AiWorker::new(
+        config,
+        queue_rx,
+        result_store,
+        queue_state,
+        notification_tx,
+    );
+    worker.run().await;
 }
 
 #[cfg(test)]
@@ -482,6 +571,7 @@ mod tests {
             enhanced: diagnosis.clone(),
             ai_status: AiStatus::Ok,
             processing_ms: 1000,
+            created_at: std::time::Instant::now(),
         };
         
         store.store("test-001", enhanced.clone()).await;

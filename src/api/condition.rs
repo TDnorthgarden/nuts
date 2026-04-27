@@ -1,4 +1,3 @@
-use crate::api::trigger::{TriggerRequest, TriggerTarget, TriggerTimeWindow};
 use crate::collector::block_io::{run_block_io_collect_poc, BlockIoCollectorConfig};
 use crate::collector::cgroup_contention::{run_cgroup_contention_collect_poc, CgroupContentionConfig};
 use crate::collector::network::{run_network_collect_poc, NetworkCollectorConfig};
@@ -172,6 +171,7 @@ impl ConditionTrigger {
                         ],
                         requested_events: vec!["latency_spike".into(), "connectivity_failure_burst".into()],
                         nri_table: self.nri_table.clone(),
+                        target_pids: None,
                     };
                     let evidence = run_network_collect_poc(network_cfg);
                     evidences.push(evidence);
@@ -190,6 +190,7 @@ impl ConditionTrigger {
                         ],
                         requested_events: vec!["io_latency_spike".into(), "io_timeout".into()],
                         nri_table: self.nri_table.clone(),
+                        target_pids: None,
                     };
                     let evidence = run_block_io_collect_poc(block_io_cfg);
                     evidences.push(evidence);

@@ -45,6 +45,10 @@ pub fn router(state: Arc<RuleApiState>) -> Router {
         .route("/v1/rules/import", post(import_rules_handler))
         .route("/v1/rules/export", get(export_rules_handler))
         .route("/v1/rules/clear", delete(clear_rules_handler))
+        // 高级规则类型端点
+        .route("/v1/rules/correlation", post(create_correlation_rule_handler))
+        .route("/v1/rules/statistical", post(create_statistical_rule_handler))
+        .route("/v1/rules/trend", post(create_trend_rule_handler))
         .with_state(state)
 }
 
@@ -246,6 +250,168 @@ async fn status_handler(
 ) -> Json<ApiResponse<RuleManagerStatus>> {
     let status = state.rule_manager.status_report().await;
     Json(ApiResponse::success(status))
+}
+
+// ==================== 高级规则类型 API ====================
+
+/// 关联型规则创建请求
+#[derive(Debug, Deserialize)]
+pub struct CreateCorrelationRuleRequest {
+    pub rule_id: String,
+    pub name: String,
+    pub primary_evidence_type: String,
+    pub related_types: Vec<String>,
+    pub conditions: Vec<MetricCondition>,
+    pub conclusion_title: String,
+    pub severity: u8,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MetricCondition {
+    pub metric_name: String,
+    pub threshold: f64,
+    pub operator: String,
+}
+
+/// 统计型规则创建请求
+#[derive(Debug, Deserialize)]
+pub struct CreateStatisticalRuleRequest {
+    pub rule_id: String,
+    pub name: String,
+    pub evidence_type: String,
+    pub metric_name: String,
+    pub anomaly_type: String,
+    pub window_secs: u64,
+    pub threshold: f64,
+    pub conclusion_title: String,
+    pub severity: u8,
+}
+
+/// 趋势型规则创建请求
+#[derive(Debug, Deserialize)]
+pub struct CreateTrendRuleRequest {
+    pub rule_id: String,
+    pub name: String,
+    pub evidence_type: String,
+    pub metric_name: String,
+    pub direction: String,  // increasing, decreasing, stable
+    pub min_slope: f64,
+    pub forecast_window_secs: u64,
+    pub forecast_threshold: f64,
+    pub conclusion_title: String,
+    pub severity: u8,
+}
+
+/// 通用规则创建响应
+#[derive(Debug, Serialize)]
+pub struct CreateAdvancedRuleResponse {
+    pub rule_id: String,
+    pub rule_type: String,
+    pub status: String,
+}
+
+/// 创建关联型规则
+async fn create_correlation_rule_handler(
+    State(state): State<Arc<RuleApiState>>,
+    Json(request): Json<CreateCorrelationRuleRequest>,
+) -> Json<ApiResponse<CreateAdvancedRuleResponse>> {
+    // 将关联型规则转换为动态规则定义存储
+    // 实际实现需要将条件序列化为规则配置
+    let rule_def = DynamicRuleDef {
+        rule_id: request.rule_id.clone(),
+        name: request.name.clone(),
+        evidence_type: request.primary_evidence_type.clone(),
+        metric_name: "correlation_multi_metric".to_string(),
+        threshold: 0.0,
+        operator: "CORRELATION".to_string(),
+        conclusion_title: request.conclusion_title.clone(),
+        severity: request.severity,
+        description: format!("关联型规则: 关联类型 {:?}", request.related_types),
+        enabled: true,
+        created_at: None,
+        updated_at: None,
+    };
+
+    match state.rule_manager.add_rule(rule_def).await {
+        Ok(_) => {
+            let response = CreateAdvancedRuleResponse {
+                rule_id: request.rule_id,
+                rule_type: "correlation".to_string(),
+                status: "created".to_string(),
+            };
+            Json(ApiResponse::success(response))
+        }
+        Err(e) => Json(ApiResponse::error(format!("Failed to create correlation rule: {:?}", e))),
+    }
+}
+
+/// 创建统计型规则
+async fn create_statistical_rule_handler(
+    State(state): State<Arc<RuleApiState>>,
+    Json(request): Json<CreateStatisticalRuleRequest>,
+) -> Json<ApiResponse<CreateAdvancedRuleResponse>> {
+    let rule_def = DynamicRuleDef {
+        rule_id: request.rule_id.clone(),
+        name: request.name.clone(),
+        evidence_type: request.evidence_type.clone(),
+        metric_name: request.metric_name.clone(),
+        threshold: request.threshold,
+        operator: format!("STATISTICAL:{}", request.anomaly_type),
+        conclusion_title: request.conclusion_title.clone(),
+        severity: request.severity,
+        description: format!("统计型规则: 窗口{}秒, 异常类型{}", request.window_secs, request.anomaly_type),
+        enabled: true,
+        created_at: None,
+        updated_at: None,
+    };
+
+    match state.rule_manager.add_rule(rule_def).await {
+        Ok(_) => {
+            let response = CreateAdvancedRuleResponse {
+                rule_id: request.rule_id,
+                rule_type: "statistical".to_string(),
+                status: "created".to_string(),
+            };
+            Json(ApiResponse::success(response))
+        }
+        Err(e) => Json(ApiResponse::error(format!("Failed to create statistical rule: {:?}", e))),
+    }
+}
+
+/// 创建趋势型规则
+async fn create_trend_rule_handler(
+    State(state): State<Arc<RuleApiState>>,
+    Json(request): Json<CreateTrendRuleRequest>,
+) -> Json<ApiResponse<CreateAdvancedRuleResponse>> {
+    let rule_def = DynamicRuleDef {
+        rule_id: request.rule_id.clone(),
+        name: request.name.clone(),
+        evidence_type: request.evidence_type.clone(),
+        metric_name: request.metric_name.clone(),
+        threshold: request.forecast_threshold,
+        operator: format!("TREND:{}", request.direction),
+        conclusion_title: request.conclusion_title.clone(),
+        severity: request.severity,
+        description: format!(
+            "趋势型规则: 方向{}, 预测窗口{}秒, 最小斜率{}",
+            request.direction, request.forecast_window_secs, request.min_slope
+        ),
+        enabled: true,
+        created_at: None,
+        updated_at: None,
+    };
+
+    match state.rule_manager.add_rule(rule_def).await {
+        Ok(_) => {
+            let response = CreateAdvancedRuleResponse {
+                rule_id: request.rule_id,
+                rule_type: "trend".to_string(),
+                status: "created".to_string(),
+            };
+            Json(ApiResponse::success(response))
+        }
+        Err(e) => Json(ApiResponse::error(format!("Failed to create trend rule: {:?}", e))),
+    }
 }
 
 #[cfg(test)]

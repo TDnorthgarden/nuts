@@ -449,13 +449,12 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
             namespace,
             pod_name,
             evidence_types,
-            metrics: _,
+            metrics,
             window_secs,
             interval,
             count,
             detailed,
         } => {
-            // TODO: 将metrics参数传递给run_watch_mode
             run_watch_mode(
                 &cli.server,
                 &client,
@@ -463,6 +462,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
                 &namespace,
                 pod_name.as_deref(),
                 &evidence_types,
+                metrics.as_ref(),
                 window_secs,
                 interval,
                 count,
@@ -648,6 +648,7 @@ async fn run_watch_mode(
     namespace: &str,
     pod_name: Option<&str>,
     evidence_types: &[String],
+    metrics: Option<&Vec<String>>,
     window_secs: u64,
     interval: u64,
     count: u32,
@@ -663,12 +664,19 @@ async fn run_watch_mode(
         cyan(&bold("🐿️")), 
         cyan(&bold("Nuts Observer Watch Mode"))
     );
-    println!("{} {}/{} | {}: {} | {}: {}s | {}: {}s",
+    // 构建指标显示字符串
+    let metrics_display = metrics
+        .map(|m| m.join(","))
+        .unwrap_or_else(|| "all".to_string());
+    
+    println!("{} {}/{} | {}: {} | {}: {} | {}: {}s | {}: {}s",
         dim("Target:"),
         yellow(namespace),
         yellow(&pod_uid[..std::cmp::min(8, pod_uid.len())]),
         dim("Evidence"),
         green(&evidence_types.join(",")),
+        dim("Metrics"),
+        cyan(&metrics_display),
         dim("Interval"),
         cyan(&interval.to_string()),
         dim("Window"),
@@ -682,6 +690,22 @@ async fn run_watch_mode(
         let start_time = now - (window_secs as i64 * 1000);
 
         let idempotency_key = format!("cli-watch-{}-{}", pod_uid, now);
+        
+        // 构建 collection_options，包含指标参数
+        let mut collection_options = serde_json::Map::new();
+        collection_options.insert("requested_evidence_types".to_string(), json!(evidence_types));
+        
+        // 如果有指定指标，添加到请求中
+        if let Some(ref metrics_list) = metrics {
+            if !metrics_list.is_empty() {
+                let metrics_map: serde_json::Map<String, serde_json::Value> = 
+                    evidence_types.iter()
+                        .map(|et| (et.clone(), json!(metrics_list)))
+                        .collect();
+                collection_options.insert("requested_metrics_by_type".to_string(), json!(metrics_map));
+            }
+        }
+        
         let request_body = json!({
             "trigger_type": "manual",
             "target": {
@@ -693,9 +717,7 @@ async fn run_watch_mode(
                 "start_time_ms": start_time,
                 "end_time_ms": now
             },
-            "collection_options": {
-                "requested_evidence_types": evidence_types
-            },
+            "collection_options": collection_options,
             "idempotency_key": idempotency_key
         });
 
@@ -1459,7 +1481,7 @@ async fn handle_config_command(
                             let threshold = rule.get("threshold").and_then(|t| t.as_f64()).map(|v| format!("{:.2}", v)).unwrap_or_else(|| "N/A".to_string());
                             let enabled = rule.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
                             
-                            let status = if enabled { "✓" } else { "✗" };
+                            let _status = if enabled { "✓" } else { "✗" };
                             println!("{:<25} {:<20} {:<20} {:<10} {:<10} {} {}", 
                                 id.chars().take(24).collect::<String>(),
                                 name.chars().take(19).collect::<String>(),

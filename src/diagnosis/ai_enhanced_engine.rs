@@ -9,6 +9,8 @@ use crate::ai::{
 use crate::diagnosis::engine::RuleEngine;
 use crate::types::diagnosis::{DiagnosisResult, DiagnosisStatus};
 use crate::types::evidence::Evidence;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tracing::{debug, info, warn};
@@ -23,6 +25,8 @@ pub struct AiEnhancedEngine {
     ai_task_tx: Option<mpsc::UnboundedSender<AiTask>>,
     /// 是否启用异步 AI 处理
     enable_async: bool,
+    /// AI 结果存储（异步任务完成后的结果）
+    ai_results: Arc<RwLock<HashMap<String, AiEnhancedDiagnosis>>>,
 }
 
 /// AI 任务（用于异步处理）
@@ -49,6 +53,8 @@ pub struct AiEngineConfig {
     pub enable_async: bool,
     /// 异步工作线程数
     pub worker_threads: usize,
+    /// AI 结果 TTL（秒），默认 3600（1小时）
+    pub result_ttl_secs: u64,
 }
 
 impl Default for AiEngineConfig {
@@ -59,6 +65,7 @@ impl Default for AiEngineConfig {
             llm_config: None,
             enable_async: true,
             worker_threads: 2,
+            result_ttl_secs: 3600,
         }
     }
 }
@@ -82,11 +89,17 @@ impl AiEnhancedEngine {
             ai_adapter,
             ai_task_tx: None,
             enable_async: config.enable_async,
+            ai_results: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // 如果启用异步处理，启动后台工作线程
         if config.enabled && config.enable_async {
             engine.start_async_workers(config.worker_threads);
+        }
+
+        // 启动 TTL 清理任务（只要启用 AI 就启动，不限于异步模式）
+        if config.enabled {
+            engine.start_cleanup_worker(config.result_ttl_secs);
         }
 
         engine
@@ -101,6 +114,10 @@ impl AiEnhancedEngine {
         let api_key = std::env::var("NUTS_AI_API_KEY").ok();
         let endpoint = std::env::var("NUTS_AI_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:8000/v1/chat/completions".to_string());
+        let result_ttl_secs = std::env::var("NUTS_AI_RESULT_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600);
 
         let config = AiEngineConfig {
             enabled,
@@ -119,6 +136,7 @@ impl AiEnhancedEngine {
             llm_config: None,
             enable_async: true,
             worker_threads: 2,
+            result_ttl_secs,
         };
 
         Self::new(rule_engine, config)
@@ -129,8 +147,9 @@ impl AiEnhancedEngine {
         let (tx, mut rx) = mpsc::unbounded_channel::<AiTask>();
         self.ai_task_tx = Some(tx);
 
-        // 克隆 AI 适配器用于后台任务
+        // 克隆 AI 适配器和结果存储用于后台任务
         let ai_adapter = self.ai_adapter.clone();
+        let ai_results = self.ai_results.clone();
 
         // 启动后台处理任务
         tokio::spawn(async move {
@@ -143,17 +162,55 @@ impl AiEnhancedEngine {
                     // 构建 AI 输入
                     let ai_input = adapter.build_input(&task.diagnosis, &task.evidences);
 
-                    // 这里应该调用实际的 AI 分析
-                    // 目前只是模拟
+                    // 实际调用 AI 分析
                     info!(
-                        "AI analysis would be performed for task {} with {} evidences",
+                        "AI analysis starting for task {} with {} evidences",
                         task.task_id,
                         task.evidences.len()
                     );
 
-                    // TODO: 实际调用 LLM 并存储结果
-                    // let result = adapter.analyze(ai_input).await;
-                    // store_result(task.task_id, result).await;
+                    // 调用 LLM 并存储结果
+                    let start = std::time::Instant::now();
+                    match adapter.call_ai(&ai_input).await {
+                        Ok(ai_output) => {
+                            let processing_ms = start.elapsed().as_millis() as i64;
+                            info!(
+                                "AI analysis completed for task {} in {}ms",
+                                task.task_id, processing_ms
+                            );
+
+                            // 构建增强诊断结果
+                            let enhanced = AiEnhancedDiagnosis {
+                                original: task.diagnosis.clone(),
+                                ai_output: Some(ai_output.clone()),
+                                enhanced: adapter.enhance_diagnosis(&task.diagnosis, &ai_output),
+                                ai_status: crate::types::diagnosis::AiStatus::Ok,
+                                processing_ms,
+                                created_at: std::time::Instant::now(),
+                            };
+
+                            // 存储结果
+                            if let Ok(mut results) = ai_results.write() {
+                                results.insert(task.task_id.clone(), enhanced);
+                                info!("Stored AI result for task {}", task.task_id);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("AI analysis failed for task {}: {}", task.task_id, e);
+                            // 存储失败状态
+                            let enhanced = AiEnhancedDiagnosis {
+                                original: task.diagnosis.clone(),
+                                ai_output: None,
+                                enhanced: adapter.apply_fallback(&task.diagnosis),
+                                ai_status: crate::types::diagnosis::AiStatus::Unavailable,
+                                processing_ms: start.elapsed().as_millis() as i64,
+                                created_at: std::time::Instant::now(),
+                            };
+                            if let Ok(mut results) = ai_results.write() {
+                                results.insert(task.task_id.clone(), enhanced);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -270,9 +327,79 @@ impl AiEnhancedEngine {
 
     /// 获取 AI 增强的诊断（如果已完成）
     pub async fn get_ai_enhanced_diagnosis(&self, task_id: &str) -> Option<AiEnhancedDiagnosis> {
-        // TODO: 从存储中查询异步完成的 AI 增强结果
-        // 目前返回 None，表示尚未实现存储
-        None
+        // 从存储中查询异步完成的 AI 增强结果
+        if let Ok(results) = self.ai_results.read() {
+            results.get(task_id).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// 列出所有 AI 增强诊断结果
+    pub async fn list_ai_diagnoses(&self) -> Vec<(String, AiEnhancedDiagnosis)> {
+        if let Ok(results) = self.ai_results.read() {
+            results.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        } else {
+            vec![]
+        }
+    }
+
+    /// 按状态查询 AI 诊断结果
+    pub async fn find_by_status(&self, status: crate::types::diagnosis::AiStatus) -> Vec<(String, AiEnhancedDiagnosis)> {
+        if let Ok(results) = self.ai_results.read() {
+            results
+                .iter()
+                .filter(|(_, v)| v.ai_status == status)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+
+    /// 启动 TTL 清理后台任务
+    fn start_cleanup_worker(&self, ttl_secs: u64) {
+        let results = self.ai_results.clone();
+        let interval = std::cmp::max(ttl_secs / 10, 60); // 每 1/10 TTL 或至少 60 秒检查一次
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval));
+
+            loop {
+                ticker.tick().await;
+
+                let now = std::time::Instant::now();
+                let ttl = Duration::from_secs(ttl_secs);
+
+                if let Ok(mut results) = results.write() {
+                    let before = results.len();
+                    results.retain(|_, v| now.duration_since(v.created_at) < ttl);
+                    let after = results.len();
+                    let cleaned = before - after;
+
+                    if cleaned > 0 {
+                        info!("Cleaned {} expired AI results (TTL: {}s)", cleaned, ttl_secs);
+                    }
+                }
+            }
+        });
+
+        info!("Started AI results cleanup worker (TTL: {}s, interval: {}s)", ttl_secs, interval);
+    }
+
+    /// 手动清理过期结果
+    pub fn cleanup_expired(&self, ttl_secs: u64) -> usize {
+        let now = std::time::Instant::now();
+        let ttl = Duration::from_secs(ttl_secs);
+
+        if let Ok(mut results) = self.ai_results.write() {
+            let before = results.len();
+            results.retain(|_, v| now.duration_since(v.created_at) < ttl);
+            let cleaned = before - results.len();
+            cleaned
+        } else {
+            0
+        }
     }
 
     /// 健康检查

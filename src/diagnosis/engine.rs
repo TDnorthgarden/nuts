@@ -1,5 +1,8 @@
 use crate::types::diagnosis::*;
 use crate::types::evidence::Evidence;
+use crate::diagnosis::correlation_rule::{create_default_correlation_rules, CorrelationRule};
+use crate::diagnosis::statistical_rule::{create_default_statistical_rules, StatisticalRule};
+use crate::diagnosis::trend_rule::{create_default_trend_rules, TrendRule};
 
 /// 规则引擎 - 基于阈值型规则生成诊断结论（第 1 周 PoC）
 pub struct RuleEngine {
@@ -134,7 +137,7 @@ impl RuleEngine {
     }
 
     /// 创建空的规则引擎（用于动态规则管理）
-    pub(crate) fn new_empty() -> Self {
+    pub fn new_empty() -> Self {
         Self { rules: Vec::new() }
     }
 
@@ -305,6 +308,21 @@ impl RuleEngine {
             "综合资源争抢评分超过 70，多维度资源紧张",
             8,
         )));
+
+        // 注册关联型规则
+        for rule in create_default_correlation_rules() {
+            self.add_rule(rule);
+        }
+
+        // 注册统计异常型规则
+        for rule in create_default_statistical_rules() {
+            self.add_rule(rule);
+        }
+
+        // 注册趋势分析规则
+        for rule in create_default_trend_rules() {
+            self.add_rule(rule);
+        }
     }
 
     pub fn add_rule(&mut self, rule: Box<dyn Rule>) {
