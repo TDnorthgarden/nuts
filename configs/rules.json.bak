@@ -1,0 +1,67 @@
+[
+  {
+    "description": "当容器启动时记录日志",
+    "dsl": "event.type == 'ContainerStart'",
+    "dsl_engine": "cel",
+    "enabled": true,
+    "id": "rule-1",
+    "version": 1,
+    "action": "exec",
+    "command": "ls -al",
+    "expansion": {}
+  },
+  {
+    "description": "当容器停止时触发告警",
+    "dsl": "event.type == 'ContainerStop'",
+    "dsl_engine": "cel",
+    "enabled": true,
+    "id": "rule-2",
+    "version": 1,
+    "action": "exec",
+    "command": "echo 'alert: container stopped'",
+    "expansion": {}
+  },
+  {
+    "description": "检测命名空间为 production 的容器更新事件",
+    "dsl": "event.type == 'ContainerUpdate' && event.payload.namespace == 'production'",
+    "dsl_engine": "cel",
+    "enabled": true,
+    "id": "rule-3",
+    "version": 1,
+    "action": "exec",
+    "command": "curl -s http://localhost:8080/api/v1/notify -d 'production container updated'",
+    "expansion": {}
+  },
+  {
+    "description": "检测命名空间为 production 的容器更新事件",
+    "dsl": "event.type == 'RunPodSandbox'",
+    "dsl_engine": "cel",
+    "enabled": true,
+    "id": "rule-4",
+    "version": 1,
+    "action": "exec",
+    "command": "echo 'sandbox created'",
+    "expansion": {
+      "retry_count": 3,
+      "timeout": 300,
+      "severity": "high",
+      "notification_channel": "ops-team"
+    }
+  },
+  {
+    "description": "检测命名空间为 production 的容器更新事件",
+    "dsl": "event.type == 'TaskStart'",
+    "dsl_engine": "cel",
+    "enabled": true,
+    "id": "rule-5",
+    "version": 1,
+    "action": "exec",
+    "command": "echo 'task start detected'",
+    "expansion": {
+      "retry_count": 3,
+      "timeout": 300,
+      "severity": "high",
+      "notification_channel": "ops-team22222"
+    }
+  }
+]

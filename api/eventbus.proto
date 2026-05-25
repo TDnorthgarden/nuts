@@ -1,0 +1,43 @@
+// This file is the canonical IDL definition for the EventBus gRPC service.
+// The generated Go code is in api/eventbus.pb.go and api/eventbus_grpc.pb.go.
+// To regenerate, run: make proto
+
+syntax = "proto3";
+
+package eventbus;
+
+option go_package = "github.com/sig-cloudnative/nuts/api";
+
+// EventBusService 事件总线服务
+service EventBusService {
+    // Publish 发布事件
+    rpc Publish(PublishRequest) returns (PublishResponse);
+
+    // Subscribe 订阅事件流
+    rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+// PublishRequest 发布请求
+message PublishRequest {
+    string topic = 1;
+    bytes event_data = 2;
+    string content_type = 3;
+}
+
+// PublishResponse 发布响应
+message PublishResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// SubscribeRequest 订阅请求
+message SubscribeRequest {
+    string topic = 1;
+    string client_id = 2;
+}
+
+// SubscribeResponse 订阅响应
+message SubscribeResponse {
+    bytes event_data = 1;
+    string content_type = 2;
+}

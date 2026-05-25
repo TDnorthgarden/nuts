@@ -1,138 +1,176 @@
 package policy
 
 import (
-	"fmt"
-	"time"
+	"context"
+
+	"github.com/sig-cloudnative/nuts/pkg/common"
+	"github.com/sig-cloudnative/nuts/pkg/config"
 )
 
-// ValidationError represents a validation error
-type ValidationError struct {
-	Field   string
-	Message string
+// PolicyEngine 策略引擎接口
+// 负责事件与策略的匹配，触发任务创建
+type PolicyEngine interface {
+	// Match 匹配事件与策略
+	// ctx: 上下文（支持超时和取消）
+	// event: 输入事件
+	// 返回匹配的策略列表
+	Match(ctx context.Context, event *common.Event) ([]*PolicyMatch, error)
+
+	// Evaluate 评估单个策略
+	// policyID: 策略ID
+	// event: 输入事件
+	// 返回是否匹配
+	Evaluate(policyID string, event *common.Event) (bool, error)
+
+	// ListPolicies 列出所有策略
+	ListPolicies() ([]*Policy, error)
+
+	// GetPolicy 获取单个策略详情
+	GetPolicy(policyID string) (*Policy, error)
+
+	// GetManager 获取策略管理器（用于HTTP API）
+	GetManager() PolicyManager
+
+	// Init 初始化策略引擎，从配置加载策略和 DSL 引擎
+	Init(cfg config.ConfigManager) error
+
+	// Start 启动策略引擎
+	Start(ctx context.Context) error
+
+	// Stop 停止策略引擎
+	Stop() error
+
+	// Health 健康检查
+	Health() error
+
+	// GetStats 获取引擎统计信息
+	GetStats() EngineStats
 }
 
-func (e *ValidationError) Error() string {
-	return fmt.Sprintf("validation error on field '%s': %s", e.Field, e.Message)
+// Policy 策略定义
+type Policy struct {
+	// ID 策略唯一标识
+	ID string `json:"id" yaml:"id" validate:"required,min=1,max=100"`
+
+	// Description 策略描述
+	Description string `json:"description" yaml:"description" validate:"max=1000"`
+
+	// Enabled 是否启用
+	Enabled bool `json:"enabled" yaml:"enabled"`
+
+	// DSL 策略表达式（DSL语言）
+	DSL string `json:"dsl" yaml:"dsl" validate:"required"`
+
+	// DSLEngine 使用的DSL引擎类型
+	DSLEngine string `json:"dsl_engine" yaml:"dsl_engine" validate:"required,oneof=cel libdslgo rego"`
+
+	// Command 动作命令（与具体 action 实现配套使用）
+	Command string `json:"command" yaml:"command,omitempty"`
+
+	// Expansion 策略自定义内容（不做策略匹配使用，仅用于事件传递）
+	Expansion map[string]interface{} `json:"expansion" yaml:"expansion,omitempty"`
+
+	// Version 乐观锁版本号
+	Version int64 `json:"version" yaml:"version,omitempty"`
 }
 
-// PolicyMatcher is the interface for matching policies against events
-type PolicyMatcher interface {
-	// Match checks if an event matches any policy
-	Match(event *Event) (*MatchResult, error)
+// Validate 验证策略
+func (p *Policy) Validate() error {
+	if err := common.ValidateStruct(p); err != nil {
+		return err
+	}
+
+	// 自定义验证逻辑
+	if p.DSLEngine == "" {
+		p.DSLEngine = "cel" // 默认使用 CEL
+	}
+
+	return nil
 }
 
-// PolicyReceiver is the interface for receiving and managing policies
-type PolicyReceiver interface {
-	// Receive creates a new policy
-	Receive(policy *Policy) error
+// PolicyMatch 策略匹配结果
+type PolicyMatch struct {
+	// PolicyID 匹配的策略ID
+	PolicyID string
 
-	// Update updates an existing policy
-	Update(policy *Policy) error
+	// Matched 是否匹配
+	Matched bool
 
-	// Delete deletes a policy by ID
-	Delete(id string) error
+	// EvaluationTime 评估耗时（毫秒）
+	EvaluationTime int64
 
-	// Get retrieves a policy by ID
+	// Error 评估错误（如果有）
+	Error error
+
+	// Command 动作命令（从匹配的策略中复制，与具体 action 实现配套使用）
+	Command string
+
+	// Expansion 策略自定义内容（从匹配的策略中复制）
+	Expansion map[string]interface{}
+}
+
+// PolicyStore 策略存储接口
+type PolicyStore interface {
+	// Get 获取策略
 	Get(id string) (*Policy, error)
 
-	// List retrieves all policies
+	// List 列出所有策略
 	List() ([]*Policy, error)
+
+	// ListEnabled 列出启用的策略
+	ListEnabled() ([]*Policy, error)
+
+	// Create 创建策略
+	Create(policy *Policy) error
+
+	// Update 更新策略
+	Update(policy *Policy) error
+
+	// Delete 删除策略
+	Delete(id string) error
+
+	// Count 获取策略数量
+	Count() (int, error)
 }
 
-// PolicyNotifier is the interface for notifying other components about policy events
-type PolicyNotifier interface {
-	// NotifyCollectorStart notifies the collector to start collection
-	NotifyCollectorStart(cgroupID string, policyID string, metrics map[string][]string) error
+// PolicyManager 策略管理器接口
+type PolicyManager interface {
+	// AddPolicy 添加策略
+	AddPolicy(policy *Policy) error
 
-	// NotifyCollectorStop notifies the collector to stop collection
-	NotifyCollectorStop(cgroupID string, policyID string) error
+	// RemovePolicy 移除策略
+	RemovePolicy(policyID string) error
 
-	// NotifyAggregationStart notifies the aggregation engine to start aggregation
-	NotifyAggregationStart(cgroupID string, policyID string, duration time.Duration) error
+	// UpdatePolicy 更新策略
+	UpdatePolicy(policy *Policy) error
 
-	// NotifyAggregationStop notifies the aggregation engine to stop aggregation
-	NotifyAggregationStop(cgroupID string, policyID string) error
+	// GetPolicy 获取策略
+	GetPolicy(policyID string) (*Policy, error)
 
-	// NotifyAnalysisStart notifies the analysis engine to start analysis
-	NotifyAnalysisStart(cgroupID string, policyID string) error
+	// ListPolicies 列出策略
+	ListPolicies() ([]*Policy, error)
 
-	// NotifyAnalysisStop notifies the analysis engine to stop analysis
-	NotifyAnalysisStop(cgroupID string, policyID string) error
+	// EnablePolicy 启用策略
+	EnablePolicy(policyID string) error
 
-	// NotifyReportStart notifies the reporting engine to start report generation
-	NotifyReportStart(cgroupID string, policyID string) error
+	// DisablePolicy 禁用策略
+	DisablePolicy(policyID string) error
 
-	// NotifyReportStop notifies the reporting engine to stop report generation
-	NotifyReportStop(cgroupID string, policyID string) error
+	// ReloadPolicies 重新加载策略
+	ReloadPolicies() error
 
-	// NotifyTaskCompleted notifies that a task has completed successfully
-	NotifyTaskCompleted(taskID string, cgroupID string, policyID string) error
+	// ValidatePolicy 校验策略 DSL 语法
+	ValidatePolicy(policyID string) error
 
-	// NotifyTaskFailed notifies that a task has failed
-	NotifyTaskFailed(taskID string, cgroupID string, policyID string, err error) error
-}
+	// ValidatePolicyTemp 临时校验策略 DSL 语法（不保存）
+	ValidatePolicyTemp(policy *Policy) error
 
-// Policy represents a monitoring policy
-type Policy struct {
-	ID        string              `json:"id"`
-	Name      string              `json:"name"`
-	Metrics   map[string][]string `json:"metrics"`  // key: category (process/file/network/io/perf), value: list of script names
-	Duration  int64               `json:"duration"` // in seconds
-	Rule      string              `json:"rule"`     // DSL rule in YAML format (can include macros, lists, etc.)
-	CreatedAt time.Time           `json:"created_at"`
-	UpdatedAt time.Time           `json:"updated_at"`
-}
+	// GetCompiledProgram 获取编译后的策略程序
+	GetCompiledProgram(policyID string) (*DSLExpression, error)
 
-// Event represents an event from the data source
-type Event struct {
-	ID        string            `json:"id"`
-	Type      string            `json:"event.type"` // NRI event type
-	CgroupID  string            `json:"cgroup.id"`
-	PodName   string            `json:"pod.name"`
-	Namespace string            `json:"pod.namespace"`
-	Container string            `json:"container.name"`
-	PID       int32             `json:"pod.pid"`
-	Timestamp time.Time         `json:"event.timestamp"`
-	Metadata  map[string]string `json:"metadata"`
-}
+	// RegisterEngine 注册 DSL 引擎
+	RegisterEngine(engine DSLEngine)
 
-// MatchResult represents the result of a policy match
-type MatchResult struct {
-	PolicyID string              `json:"policy_id"`
-	Metrics  map[string][]string `json:"metrics"`  // key: category, value: list of script names
-	Duration int64               `json:"duration"` // in seconds
-	Matched  bool                `json:"matched"`
-	Reason   string              `json:"reason"`
-}
-
-// Validate validates the policy
-func (p *Policy) Validate() error {
-	if p.ID == "" {
-		return &ValidationError{Field: "id", Message: "id is required"}
-	}
-	if p.Name == "" {
-		return &ValidationError{Field: "name", Message: "name is required"}
-	}
-	if len(p.Metrics) == 0 {
-		return &ValidationError{Field: "metrics", Message: "at least one metric category is required"}
-	}
-	validCategories := map[string]bool{
-		"process": true,
-		"file":    true,
-		"network": true,
-		"io":      true,
-		"perf":    true,
-	}
-	for category := range p.Metrics {
-		if !validCategories[category] {
-			return &ValidationError{Field: "metrics", Message: fmt.Sprintf("invalid metric category '%s', must be one of: process, file, network, io, perf", category)}
-		}
-		if len(p.Metrics[category]) == 0 {
-			return &ValidationError{Field: "metrics", Message: fmt.Sprintf("metric category '%s' must have at least one script", category)}
-		}
-	}
-	if p.Duration <= 0 {
-		return &ValidationError{Field: "duration", Message: "duration must be greater than 0"}
-	}
-	return nil
+	// GetStats 获取管理器统计信息
+	GetStats() ManagerStats
 }

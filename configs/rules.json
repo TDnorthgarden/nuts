@@ -1,0 +1,15 @@
+[
+  {
+    "description": "当容器启动时记录日志",
+    "dsl": "event.type == 'ContainerStart'",
+    "dsl_engine": "cel",
+    "enabled": true,
+    "id": "rule-1",
+    "version": 1,
+    "expansion": {
+      "retry_count": 3,
+      "severity": "high",
+      "notification_channel": "ops-team22222"
+    }
+  }
+]

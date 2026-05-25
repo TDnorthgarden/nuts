@@ -1,408 +1,253 @@
-# Nuts - 故障分析插件系统
+# NUTS
 
-基于Go语言开发的容器性能监控和诊断系统，通过containerd的NRI机制获取容器生命周期事件，使用BPF技术采集进程、文件、网络、IO等事件数据，并通过策略引擎、聚合引擎和诊断引擎进行性能瓶颈分析。
+A general-purpose, event-driven task scheduling framework for building reactive automation systems.
 
-## 项目概述
+## Overview
 
-Nuts是一个用于Kubernetes环境的容器性能监控和故障诊断系统，具有以下特点：
+NUTS is a business-agnostic core framework that decouples **event collection**, **policy matching**, and **task execution** into composable layers. It is designed for scenarios where container lifecycle events (or any other event source) need to trigger configurable, stateful task workflows.
 
-- **基于NRI机制**：通过containerd NRI接口获取容器生命周期事件
-- **BPF数据采集**：使用eBPF技术采集系统级性能数据
-- **策略驱动**：支持灵活的策略配置，按需采集数据
-- **DSL规则引擎**：内置DSL语言支持复杂规则匹配和条件判断
-- **状态机管理**：基于状态机的任务生命周期管理
-- **智能诊断**：支持基于规则和AI的故障诊断
-- **多数据库支持**：支持SQLite、MySQL、PostgreSQL、InfluxDB、ClickHouse等多种数据库
+## Architecture
 
-## 系统架构
+```mermaid
+graph TB
+    subgraph Client["Client Layer"]
+        CLI["nuts-cli<br/>(Cobra)"]
+        TUI["nuts-tui<br/>(BubbleTea)"]
+    end
 
-### 三大核心组件
+    subgraph Server["NUTS Server (core)"]
+        DS["DataSource<br/>(NRI / CRI / Mock / HTTP)"]
+        PE["PolicyEngine<br/>(CEL DSL)"]
+        SME["StateMachineEngine"]
+        TS["TaskStore<br/>(SQLite / Memory)"]
+        EB["EventBus<br/>(gRPC)"]
+        EC["External Components<br/>(state handlers)"]
+    end
 
-1. **CLI工具** (`nuts-cli`) - 命令行工具
-   - 功能：推送策略给service
-   - 交互方式：HTTP/gRPC
+    CLI -- "HTTP API" --> Server
+    TUI -- "HTTP API" --> Server
 
-2. **Service** (`nuts-service`) - 核心服务
-   - 功能：NRI事件接收、策略引擎、聚合引擎、诊断引擎
-   - 部署方式：Deployment（普通容器，可多副本）
-   - 通过gRPC调用collector服务
+    DS -- "Go Channel<br/>(zero-copy)" --> PE
+    PE -- "policyMatchedCh" --> SME
+    SME --- TS
+    SME -- "Publish task.state_changed_*" --> EB
+    EB -- "Subscribe" --> EC
+    EC -- "Publish state.transition.command" --> EB
+    EB -- "HandleTransitionCommand" --> SME
+```
 
-3. **Collector** (`nuts-collector`) - 独立采集器
-   - 功能：基于bpftrace的数据采集
-   - 采集类型：进程、文件、网络、IO、perf
-   - 部署方式：DaemonSet（特权容器，每个节点运行）
-   - 通过gRPC提供服务接口
+### Data Flow
 
-### 核心模块
+```mermaid
+sequenceDiagram
+    participant DS as DataSource
+    participant PE as PolicyEngine
+    participant SME as StateMachineEngine
+    participant EB as EventBus
+    participant EC as External Components
 
-- **DataSource**：NRI事件接收和cgroup信息填充
-- **PolicyEngine**：策略匹配、任务管理、通知器
-- **Collector**：多种采集器和脚本管理器
-- **AggregationEngine**：事件聚合、多种聚合算法
-- **DiagnosticEngine**：审计分析、瓶颈检测、报告生成
+    DS->>PE: Event (Go Channel)
+    PE->>PE: Match() against CEL rules
+    PE->>SME: policyMatchedCh
+    SME->>SME: CreateTask() + persist to TaskStore
+    SME->>EB: Publish("task.state_changed_*")
+    EB->>EC: Subscribe + deliver event
+    EC->>EC: Execute business logic
+    EC->>EB: Publish("state.transition.command")
+    EB->>SME: HandleTransitionCommand()
+    SME->>SME: Transition state + update TaskStore
+```
 
-## 技术栈
+## Components
 
-- **开发语言**: Go（主要）、C/bpftrace（BPF部分）、Python（AI部分）
-- **容器运行时**: containerd 1.6+
-- **NRI版本**: containerd NRI v0.8.0
-- **Web框架**: Gin（HTTP RESTful API）
-- **RPC框架**: gRPC
-- **BPF工具**: bpftrace、bcc
-- **数据库**: SQLite、MySQL、PostgreSQL、InfluxDB、ClickHouse、LevelDB等
-- **定时任务**: robfig/cron
-- **AI框架**: OpenAI或本地大模型（第三阶段）
+| Package | Role | Key Types |
+|---------|------|-----------|
+| `pkg/core` | Orchestrator — wires all modules together, manages lifecycle | `Core`, `Config` |
+| `pkg/datasource` | Event source abstraction with factory pattern | `DataSource`, `DataSourceManager`, `DataSourceFactory` |
+| `pkg/policy` | Rule matching engine with DSL support (CEL) | `PolicyEngine`, `Policy`, `PolicyMatch`, `PolicyManager` |
+| `pkg/task` | State machine-driven task scheduling and storage | `StateMachineEngine`, `TaskStore`, `Task`, `TimeoutChecker` |
+| `pkg/eventbus` | Pub/sub message bus (gRPC server/client, noop) | `EventBus`, `GRPCEventBus`, `EventSerializer` |
+| `pkg/component` | Framework for building external state handlers | `Component`, `BaseComponent`, `WorkerPool` |
+| `pkg/config` | TOML configuration management | `ConfigManager`, `TOMLConfigManager` |
+| `pkg/db` | Generic KV storage abstraction (memory, SQLite) | `DB`, `Factory` |
+| `pkg/common` | Shared types: Event, metrics, validators, ID generation | `Event`, `MetricsRecorder` |
+| `pkg/log` | Structured logging (Zap-based) | `Logger`, `ZapLogger` |
+| `pkg/metrics` | Prometheus metrics with threshold alerting | `PrometheusMetrics`, `AlertMetrics` |
+| `pkg/trace` | OpenTelemetry distributed tracing | `InitTracer`, `GetTracer` |
+| `pkg/cli` | Cobra-based CLI client | `Execute()` |
+| `pkg/tui` | BubbleTea-based terminal UI | `App` |
 
-## 目录结构
+## Binaries
+
+| Binary | Description |
+|--------|-------------|
+| `nuts` | Server daemon — core service with HTTP API and gRPC EventBus |
+| `nuts-cli` | CLI client — command-line management via HTTP API |
+| `nuts-tui` | TUI client — interactive terminal dashboard |
+| `component-example` | Example external component demonstrating the component framework |
+
+## Features
+
+- **Interface-first design** — all core components are defined through interfaces, supporting multiple implementations
+- **Event-driven architecture** — loose coupling via Go channels (in-process) and gRPC EventBus (cross-process)
+- **State machine engine** — configurable task lifecycle with states, transitions, timeouts, and retries
+- **Policy engine with CEL** — Google CEL-based rule matching for flexible event filtering
+- **Factory pattern** — DataSource, EventBus, DB, and DSL engine all support runtime registration
+- **Observability** — Prometheus metrics, OpenTelemetry tracing, structured logging with sampling
+- **Dual storage** — in-memory (dev/test) and SQLite (production) backends via `pkg/db`
+- **Component framework** — standardized mechanism for building external state handling components with worker pools
+- **Graceful shutdown** — atomic double-start/double-stop protection, goroutine wait with configurable grace period
+
+## Quick Start
+
+### Prerequisites
+
+- Go 1.25+
+- (Optional) protoc for regenerating protobuf code
+
+### Build
+
+```bash
+# Build all binaries
+make build
+
+# Or build individually
+make build-server    # → build/nuts
+make build-cli       # → build/nuts-cli
+make build-component-example  # → build/component-example
+```
+
+### Run
+
+```bash
+# Terminal 1: Start server
+./build/nuts --config configs/nuts.toml
+
+# Terminal 2: Use CLI
+./build/nuts-cli status
+./build/nuts-cli datasource list
+./build/nuts-cli policy list
+
+# Terminal 3 (optional): Start TUI
+./build/nuts-tui --server tcp://localhost:8080
+
+# Terminal 4 (optional): Run example component
+./build/component-example --address tcp://localhost:50051
+```
+
+## Configuration
+
+Configuration is TOML-based. See `configs/nuts.toml` for a complete example.
+
+Key sections:
+
+| Section | Description |
+|---------|-------------|
+| `[global]` | Log level, node ID |
+| `[server]` | HTTP listen address (`tcp://` or `unix://`), rate limits |
+| `[datasource]` | Active datasource type and per-type config (`mock`, `nri`, `containerd`) |
+| `[policy]` | Policy engine type (`cel`), storage backend |
+| `[statemachine]` | State definitions, transitions, timeouts, retry rules |
+| `[task]` | Task storage (`memory`/`sqlite`), archive retention, scheduler settings |
+| `[eventbus]` | EventBus type (`grpc`/`noop`), gRPC listen address |
+| `[metrics]` | Prometheus namespace, alert thresholds |
+| `[tracing]` | OpenTelemetry OTLP endpoint, sample rate |
+
+## HTTP API
+
+Base URL: `http://localhost:8080`
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/status` | Service status and uptime |
+| `GET/POST` | `/api/v1/tasks` | List tasks / Create task |
+| `GET/PUT/DELETE` | `/api/v1/tasks/{id}` | Get / update / delete task |
+| `GET` | `/api/v1/statemachine/config` | State machine configuration |
+| `GET/POST` | `/api/v1/policies` | List policies / Create policy |
+| `GET/PUT/DELETE` | `/api/v1/policies/{id}` | Get / update / delete policy |
+| `POST` | `/api/v1/policies/validate` | Validate policy DSL syntax |
+| `GET/POST` | `/api/v1/datasources` | List datasources / Create datasource |
+| `GET` | `/api/v1/datasources/{id}` | Get datasource details |
+| `GET` | `/api/v1/debug/vars` | Runtime debug variables |
+| `GET` | `/metrics` | Prometheus metrics (when enabled) |
+
+## Extending NUTS
+
+### Custom DataSource
+
+```go
+type MyDataSource struct{}
+
+func (d *MyDataSource) Start(ctx context.Context, eventCh chan<- *common.Event) error { /* ... */ }
+func (d *MyDataSource) Stop() error                                                   { /* ... */ }
+func (d *MyDataSource) Health() error                                                 { /* ... */ }
+func (d *MyDataSource) GetStats() *datasource.DataSourceStats                         { /* ... */ }
+func (d *MyDataSource) Ready() <-chan struct{}                                         { /* ... */ }
+
+// Register with factory
+datasource.Factory.Register("mytype", parser, validator, creator)
+```
+
+### Custom Component (External State Handler)
+
+```go
+type MyComponent struct {
+    *component.BaseComponent
+}
+
+func NewMyComponent(bus eventbus.EventBus) *MyComponent {
+    info := component.ComponentInfo{
+        Name:         "mycomponent",
+        HandlesState: "processing",   // subscribes to task.state_changed_processing
+        NextState:    "completed",
+        FailureState: "failed",
+    }
+    comp := &MyComponent{}
+    comp.BaseComponent = component.NewBaseComponent(info, config, bus, comp.handleEvent)
+    return comp
+}
+
+func (c *MyComponent) handleEvent(event *common.Event) error {
+    taskID := event.GetPayloadString("task_id")
+    // Execute business logic, then publish state transition
+    return c.PublishStateTransition(taskID, "processing", "completed", true, "")
+}
+```
+
+## Testing
+
+```bash
+make test            # Run all tests
+make test-race       # Run with race detector
+make test-coverage   # Generate coverage report (build/coverage.html)
+make bench           # Run benchmarks
+```
+
+## Project Structure
 
 ```
 nuts/
-├── cmd/                          # 主程序入口
-│   ├── cli/                      # CLI工具
-│   ├── service/                  # Service主程序
-│   └── collector/                # 独立Collector二进制
-├── pkg/                          # 可复用库
-│   ├── aggregation/              # 聚合引擎库
-│   │   └── algorithm/          # 聚合算法接口
-│   ├── collector/                # Collector接口定义
-│   ├── datasource/               # 数据源库（NRI集成）
-│   ├── diagnostic/               # 诊断引擎库
-│   │   └── strategy/           # 诊断策略接口
-│   ├── libdslgo/                 # DSL规则引擎
-│   │   ├── docs/               # DSL文档
-│   │   └── tests/              # DSL测试
-│   ├── policy/                   # 策略接口定义
-│   │   └── task/               # 任务接口定义
-│   ├── policyengine/             # 策略引擎实现
-│   ├── statemachine/             # 状态机实现
-│   ├── storage/                  # 数据库抽象层
-│   │   ├── audit/              # 审计存储
-│   │   ├── diagnosis/          # 诊断存储
-│   │   ├── event/              # 事件存储
-│   │   └── policy/             # 策略存储
-│   ├── task/                     # 任务实现
-│   └── client/                   # Collector客户端
-├── internal/                     # 内部实现
-│   ├── api/                      # HTTP API处理器
-│   └── service/                  # Service核心实现
-├── scripts/                      # BPF脚本
-│   ├── file.bt                   # 文件IO采集
-│   ├── io.bt                     # IO采集
-│   ├── network.bt                # 网络采集
-│   ├── perf.bt                   # 性能采集
-│   ├── process.bt                # 进程采集
-│   └── crictl/                   # crictl测试脚本
-├── configs/                      # 配置文件
-│   ├── collector.yaml            # Collector配置
-│   └── service.yaml              # Service配置
-├── deployments/                  # 部署文件
-│   ├── collector.yaml            # Collector部署
-│   └── service.yaml              # Service部署
-├── docs/                         # 文档
-│   ├── arch.md                   # 架构设计
-│   ├── event.md                  # 事件定义
-│   ├── nri-cgroup.md             # NRI与cgroup分析
-│   └── plan.md                   # 开发计划
-├── example/                      # 示例文件
-│   └── rules/                    # 策略规则示例
-├── go.mod
-├── go.sum
-├── Makefile
-└── README.md
+├── api/                 # Protobuf definitions and generated code
+│   ├── event.proto      # Event type definitions (Pod, Policy, Task, Component payloads)
+│   └── eventbus.proto   # gRPC EventBus service definition
+├── cmd/
+│   ├── nuts/            # Server daemon entry point
+│   ├── nuts-cli/        # CLI client entry point
+│   ├── nuts-tui/        # TUI client entry point
+│   └── component-example/  # Example external component
+├── configs/
+│   ├── nuts.toml        # Default configuration
+│   └── rules.json       # CEL policy rules
+├── docs/
+│   ├── framework.md     # Detailed framework design document
+│   ├── phase-1.md       # Phase 1 implementation plan
+│   └── user-guide.md    # User guide
+├── pkg/                 # Core packages (see Components table above)
+├── scripts/             # Build and utility scripts
+├── Makefile             # Build system
+└── go.mod               # Go module definition
 ```
 
-## 快速开始
+## License
 
-### 前置要求
-
-- Go 1.19+
-- containerd 1.6+
-- Linux内核 4.10+（支持eBPF）
-- root权限（运行BPF程序）
-
-### 构建
-
-```bash
-# 构建所有二进制文件
-make build
-
-# 构建单个组件
-make build-cli
-make build-service
-make build-collector
-```
-
-### 运行
-
-```bash
-# 运行Service
-export NRI_PLUGIN_NAME="nuts-datasource"
-export NRI_PLUGIN_IDX="01"
-export NUTS_API_URL=http://localhost:8080
-make run-service
-
-# 运行Collector
-make run-collector
-
-# 运行CLI
-make run-cli ARGS="policy list"
-```
-
-### 使用CLI
-
-```bash
-# 创建策略（从JSON和YAML文件）
-./build/nuts-cli policy create --policy example/rules/test-policy.json --rule example/rules/test-rule-valid.yaml
-
-# 更新策略
-./build/nuts-cli policy update --id <policy-id> --policy example/rules/test-policy.json --rule example/rules/test-rule-valid.yaml
-
-# 查询策略
-./build/nuts-cli policy get <policy-id>
-
-# 列出所有策略
-./build/nuts-cli policy list
-
-# 删除策略
-./build/nuts-cli policy delete <policy-id>
-
-# 查看版本
-./build/nuts-cli version
-```
-
-### 使用HTTP API
-
-Service提供RESTful API接口，默认监听端口8080：
-
-```bash
-# 健康检查
-curl http://localhost:8080/health
-
-# 创建策略
-curl -X POST http://localhost:8080/api/v1/policies \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "my-policy",
-    "name": "My Policy",
-    "metrics": {
-      "process": ["process.bt"],
-      "network": ["network.bt"]
-    },
-    "duration": 300,
-    "rule": "event.type == \"RunPodSandbox\""
-  }'
-
-# 获取策略
-curl http://localhost:8080/api/v1/policies/<policy-id>
-
-# 列出所有策略
-curl http://localhost:8080/api/v1/policies
-
-# 更新策略
-curl -X PUT http://localhost:8080/api/v1/policies/<policy-id> \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Updated Policy",
-    "duration": 600
-  }'
-
-# 删除策略
-curl -X DELETE http://localhost:8080/api/v1/policies/<policy-id>
-
-# 列出所有任务
-curl http://localhost:8080/api/v1/tasks
-
-# 获取任务详情
-curl http://localhost:8080/api/v1/tasks/<task-id>
-
-# 按状态列出任务
-curl http://localhost:8080/api/v1/tasks/state?state=running
-
-# 按策略列出任务
-curl http://localhost:8080/api/v1/tasks/policy/<policy-id>
-
-# 按cgroup列出任务
-curl http://localhost:8080/api/v1/tasks/cgroup/<cgroup-id>
-```
-
-## 开发阶段
-
-### 第一阶段：CLI策略推送（已完成）
-- ✅ 项目初始化
-- ✅ Service基础框架搭建
-- ✅ 策略引擎实现
-- ✅ CLI工具开发
-- ✅ HTTP API实现
-- ✅ DSL规则引擎集成
-- ✅ 状态机任务管理
-- ✅ NRI数据源集成
-
-### 第二阶段：Sidecar进程（进行中）
-- ✅ Collector基础框架
-- ✅ gRPC服务框架
-- 🔄 采集器实现
-- 🔄 聚合引擎实现
-- ⏳ 集成测试
-
-### 第三阶段：AI Agent集成（计划中）
-- ⏳ 诊断引擎基础
-- ⏳ AI集成准备
-- ⏳ AI模型集成
-- ⏳ 测试和优化
-
-## 配置
-
-### Service配置
-
-Service组件提供HTTP RESTful API服务，默认监听端口8080。当前版本支持：
-
-- **策略管理**：创建、更新、删除、查询策略
-- **任务管理**：查看任务状态、按策略/cgroup/状态筛选任务
-- **NRI集成**：接收容器生命周期事件
-- **策略引擎**：基于DSL规则匹配和任务调度
-- **状态机管理**：管理任务生命周期状态
-
-### Collector配置
-
-Collector组件提供gRPC服务，默认监听端口50051。当前版本支持：
-
-- **gRPC服务框架**：基础服务已搭建
-- **BPF脚本管理**：支持多种采集脚本（进程、文件、网络、IO、perf）
-- **采集器接口**：定义了采集器标准接口
-
-### BPF脚本
-
-项目包含以下BPF采集脚本：
-
-- [`process.bt`](scripts/process.bt) - 进程事件采集
-- [`file.bt`](scripts/file.bt) - 文件IO事件采集
-- [`network.bt`](scripts/network.bt) - 网络事件采集
-- [`io.bt`](scripts/io.bt) - IO事件采集
-- [`perf.bt`](scripts/perf.bt) - 性能事件采集
-
-## 部署
-
-### Kubernetes部署
-
-```bash
-# 部署Service
-kubectl apply -f deployments/service.yaml
-
-# 部署Collector（DaemonSet）
-kubectl apply -f deployments/collector.yaml
-```
-
-## 测试
-
-```bash
-# 运行所有测试
-make test
-
-# 运行测试并生成覆盖率报告
-make test-coverage
-```
-
-## 代码质量
-
-```bash
-# 格式化代码
-make fmt
-
-# 运行go vet
-make vet
-
-# 运行linter
-make lint
-```
-
-## 文档
-
-详细文档请参考：
-
-- [架构设计](docs/arch.md)
-- [开发计划](docs/plan.md)
-- [NRI与cgroup分析](docs/nri-cgroup.md)
-- [事件定义](docs/event.md)
-- [DSL规则编写指南](pkg/libdslgo/docs/rule-writing-guide.md)
-
-## DSL规则引擎
-
-Nuts内置了强大的DSL规则引擎，支持复杂的规则匹配和条件判断：
-
-### 规则语法
-
-规则使用YAML格式编写，支持以下特性：
-
-- **事件匹配**：基于容器生命周期事件进行匹配
-- **条件判断**：支持复杂的逻辑表达式
-- **宏定义**：支持自定义宏简化规则编写
-- **列表操作**：支持对列表进行过滤、映射等操作
-
-### 示例规则
-
-```yaml
-rule: event.type == "RunPodSandbox" && pod.labels.app == "nginx"
-desc: "匹配nginx应用的Pod启动事件"
-condition: "pod.labels.app == 'nginx'"
-output: "start_monitoring"
-priority: "high"
-```
-
-更多DSL规则示例和语法说明，请参考[DSL规则编写指南](pkg/libdslgo/docs/rule-writing-guide.md)。
-
-## 任务状态机
-
-Nuts使用状态机管理任务生命周期，支持以下状态：
-
-- **Pending**：任务已创建，等待执行
-- **Running**：任务正在执行中
-- **Completed**：任务成功完成
-- **Failed**：任务执行失败
-
-状态转换由策略引擎和通知器控制，确保任务按预期流程执行。
-
-## 当前版本功能
-
-### v0.2.0
-
-**已实现功能：**
-
-- ✅ CLI工具：策略的创建、更新、删除、查询
-- ✅ HTTP API：RESTful API接口，支持策略和任务管理
-- ✅ 策略引擎：基于DSL规则的策略匹配和任务调度
-- ✅ 状态机：任务生命周期状态管理
-- ✅ NRI数据源：接收容器生命周期事件
-- ✅ Collector框架：gRPC服务框架和采集器接口定义
-- ✅ BPF脚本：进程、文件、网络、IO、perf采集脚本
-
-**开发中功能：**
-
-- 🔄 Collector采集器实现
-- 🔄 聚合引擎实现
-- 🔄 Service与Collector的gRPC集成
-
-**计划中功能：**
-
-- ⏳ 诊断引擎
-- ⏳ AI Agent集成
-- ⏳ 数据库持久化
-- ⏳ 审计日志
-- ⏳ 诊断报告生成
-
-## 贡献
-
-欢迎贡献代码！请遵循以下步骤：
-
-1. Fork本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启Pull Request
-
-## 许可证
-
-本项目采用MIT许可证 - 详见LICENSE文件
-
-## 联系方式
-
-如有问题或建议，请提交Issue或Pull Request。
+Apache License 2.0

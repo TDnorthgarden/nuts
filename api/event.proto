@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package event;
+
+option go_package = "github.com/sig-cloudnative/nuts/api";
+
+import "google/protobuf/timestamp.proto";
+
+// Event 统一事件结构（protobuf 版本）
+message Event {
+    string id = 1;
+    string type = 2;
+    string topic = 3;
+    google.protobuf.Timestamp timestamp = 4;
+    string trace_id = 5;
+    string source = 6;
+    string version = 7;
+
+    oneof payload {
+        PodEventPayload pod = 10;
+        TaskEventPayload task = 11;
+        PolicyEventPayload policy = 12;
+        ComponentEventPayload component = 13;
+    }
+}
+
+// PodEventPayload Pod 相关事件负载
+message PodEventPayload {
+    string pod_name = 1;
+    string pod_namespace = 2;
+    string pod_uid = 3;
+    string pod_id = 4;
+    string namespace = 5;
+    map<string, string> labels = 6;
+    map<string, string> extensions = 7;          // 不可预知的扩展字段（string-only fallback）
+}
+
+// TaskEventPayload 任务状态事件负载
+message TaskEventPayload {
+    // 核心字段（强类型）
+    string task_id = 1;
+    string old_state = 2;
+    string new_state = 3;
+    string current_state = 4;
+    string target_state = 5;
+    string action = 6;
+    int64 timestamp = 7;
+    string policy_id = 8;
+    string trigger_event_type = 9;
+    string trigger_event_id = 10;
+    // 扩展字段（弱类型，承载 t.Metadata 中的动态 key）
+    // 常用 key 预定义为强类型字段，其余走 map<string, string> fallback
+    map<string, string> extensions = 11;
+}
+
+// PolicyEventPayload 策略匹配事件负载
+message PolicyEventPayload {
+    // 核心字段（强类型）
+    string policy_id = 1;
+    string trigger_event_type = 2;
+    string trigger_event_source = 3;
+    string trigger_event_id = 4;
+    int64 timestamp = 5;
+    // 扩展字段（弱类型，承载 match.Expansion 中的动态 key）
+    // 常用 key 预定义为强类型字段，其余走 map<string, string> fallback
+    map<string, string> extensions = 6;
+}
+
+// ComponentEventPayload 组件事件负载
+message ComponentEventPayload {
+    string task_id = 1;
+    string current_state = 2;
+    string target_state = 3;
+    string component_name = 4;
+    bool success = 5;
+    string message = 6;
+}

@@ -6,6 +6,7 @@
     "uid": "manual-verify-pod-001"
   },
   "log_directory": "/tmp/crius-manual-logs",
+  "host_network": true,
   "linux": {
     "security_context": {
       "namespace_options": {

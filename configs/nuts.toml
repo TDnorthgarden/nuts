@@ -1,0 +1,246 @@
+# NUTS Framework Configuration
+# 参考 framework.md 完整配置示例
+
+[global]
+log_level = "debug"
+node_id = "nuts-node-01"
+
+[log]
+# 日志输出配置
+# output_path: 日志文件路径，为空时输出到终端
+output_path = ""
+# encoding: 日志编码格式 (console/json)
+encoding = "console"
+
+# 日志采样配置
+# 同一日志每秒最多输出 sampling_initial 条，之后每 sampling_thereafter 条采样 1 条
+sampling_enabled = true
+sampling_initial = 3
+sampling_thereafter = 1000
+sampling_tick_millis = 1000
+
+[server]
+# HTTP服务器配置，支持 tcp://host:port 或 unix:///path/to/socket 格式
+address = "tcp://0.0.0.0:8080"
+#address = "unix:///data/usershare/repo/github/sig-cloudnative/nuts/http.sock"
+event_rate_limit = 10
+event_burst = 10
+
+[datasource]
+type = "mock"
+# 事件通道缓冲区大小
+event_channel_buffer_size = 10
+
+[datasource.mock]
+# mock数据源配置（不定义enabled，由CLI控制启停）
+event_interval_ms = 1000
+
+#配置支持的事件
+event_types = ["ContainerStart", "ContainerStop", "ContainerUpdate"]
+
+[datasource.nri]
+socket_path = "/var/run/nri/nri.sock"
+plugin_name = "00-nuts"
+events = ["RunPodSandbox", "StopPodSandbox", "StartContainer", "StopContainer", "RemoveContainer"]
+buffer_size = 1000
+
+[datasource.containerd]
+socket_path = "/run/containerd/containerd.sock"
+namespace = "k8s.io"
+events = ["TaskCreate", "TaskStart", "TaskExit", "TaskDelete"]
+buffer_size = 1000
+
+[policy]
+# 策略引擎类型: cel / jsonlogic
+type = "cel"
+
+# 策略存储配置
+[policy.db]
+# 存储类型: memory / sqlite
+type = "sqlite"
+# sqlite 模式下的数据库路径（type=sqlite 时生效）
+path = "data/policy.db"
+
+[scheduler]
+# 调度算法类型: default / priority
+# default: 先到先服务调度
+# priority: 按任务优先级调度
+type = "priority"
+
+[statemachine]
+# 状态机配置
+name = "task_lifecycle"
+initial_state = "pending"
+payload_builder = "timestamp"
+
+# 终态列表
+terminal_states = ["completed", "failed", "abandoned"]
+
+# 状态定义
+[statemachine.states.pending]
+description = "Task is pending execution"
+state_timeout = "5s"
+auto_retry = false
+
+[statemachine.states.validating]
+description = "Task is being validated"
+state_timeout = "6s"
+auto_retry = true
+max_retries = 3
+retry_to_state = "validating"
+
+[statemachine.states.processing]
+description = "Task is being processed"
+state_timeout = "5s"
+auto_retry = true
+max_retries = 3
+retry_to_state = "processing"
+
+[statemachine.states.failover]
+description = "Task is in failover handling"
+state_timeout = "6s"
+auto_retry = false
+
+[statemachine.states.completed]
+description = "Task completed successfully"
+state_timeout = "0s"
+auto_retry = false
+
+[statemachine.states.failed]
+description = "Task failed"
+state_timeout = "0s"
+auto_retry = false
+
+[statemachine.states.abandoned]
+description = "Task abandoned after max retries"
+state_timeout = "0s"
+auto_retry = false
+
+# 转换规则（正向流程：pending -> validating -> processing -> failover -> completed）
+[[statemachine.transitions]]
+from = "pending"
+to = "validating"
+allowed = true
+
+# pending 有 state_timeout=5s 且 auto_retry=false，必须存在直接到终态的转换
+[[statemachine.transitions]]
+from = "pending"
+to = "abandoned"
+allowed = true
+
+[[statemachine.transitions]]
+from = "validating"
+to = "processing"
+allowed = true
+
+[[statemachine.transitions]]
+from = "validating"
+to = "failed"
+allowed = true
+
+[[statemachine.transitions]]
+from = "processing"
+to = "failover"
+allowed = true
+
+[[statemachine.transitions]]
+from = "processing"
+to = "failed"
+allowed = true
+
+[[statemachine.transitions]]
+from = "failover"
+to = "completed"
+allowed = true
+
+[[statemachine.transitions]]
+from = "failover"
+to = "failed"
+allowed = true
+
+[[statemachine.transitions]]
+from = "failed"
+to = "abandoned"
+allowed = true
+
+
+[id]
+# ID生成器配置
+# type: uuid (默认) | snowflake
+type = "uuid"
+
+# 雪花算法配置（type = "snowflake" 时生效）
+[id.snowflake]
+machine_id = 1  # 节点ID，范围 0-1023，集群中每个节点必须唯一
+
+# 任务模块配置
+[task]
+# 最大并发任务数
+max_concurrent = 100
+# 任务存储（单存储模型）
+[task.db]
+# 存储类型: memory / sqlite
+# memory: 内存存储（默认，推荐开发和测试）
+# sqlite: SQLite 持久化存储（推荐生产环境）
+type = "sqlite"
+# sqlite 模式下的数据库路径（type=sqlite 时生效）
+path = "data/tasks.db"
+
+# 自动清理配置
+[task.archive]
+# 历史任务保留天数（0 表示不清理）
+retention_days = 30
+# 清理间隔
+cleanup_interval = "1h"
+
+# 任务调度器配置
+[task.scheduler]
+# 超时检查间隔（支持 time.ParseDuration 格式: "30s", "1m"）
+timeout_check_interval = "3s"
+
+# 事件总线配置
+[eventbus]
+# 事件总线类型: grpc / noop
+# grpc: 通过 gRPC 与远程组件通信（需要同时运行外部组件进程）
+# noop: 空操作，独立模式（不配置 eventbus.type 时默认使用 noop，不启动 gRPC 服务）
+type = "grpc"
+# 订阅者通道缓冲区大小
+subscriber_channel_buffer_size = 100
+# 发布超时时间（秒）
+publish_timeout_seconds = 5
+# 最大并发分发器数量
+max_concurrent_dispatchers = 10
+
+[eventbus.grpc]
+address = "tcp://localhost:50051"
+#address = "unix:///data/usershare/repo/github/sig-cloudnative/nuts/grpc.sock"
+
+# 指标收集配置
+[metrics]
+# 类型: noop / prometheus
+# noop: 空实现（默认）
+# prometheus: 暴露 /metrics 端点
+type = "prometheus"
+# Prometheus 指标前缀
+namespace = "nuts"
+
+# 告警配置（基于指标阈值输出告警日志）
+[metrics.alert]
+# 是否启用告警
+enabled = true
+# 超时率阈值（次/秒），超过则输出 Error 日志
+timeout_rate_threshold = 10.0
+# 错误率阈值（次/秒），超过则输出 Error 日志
+error_rate_threshold = 20.0
+
+# 分布式追踪配置
+[tracing]
+# 是否启用 OpenTelemetry 追踪
+enabled = false
+# OTLP gRPC collector 地址
+endpoint = "localhost:4317"
+# 服务名称
+service_name = "nuts"
+# 采样率 (0.0 ~ 1.0)
+sample_rate = 1.0
+
