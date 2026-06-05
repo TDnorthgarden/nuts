@@ -111,7 +111,7 @@ func BenchmarkTransitionState_Atomic(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := store.TransitionState(ids[i], TaskStateProcessing, "bench", "test", nil, false, nil, nil)
+		_, err := store.TransitionState(ids[i], TaskStateProcessing, "bench", "test", nil, false, false, nil, nil, nil)
 		if err != nil {
 			b.Fatal(err)
 		}

@@ -212,6 +212,14 @@ func (m *MockDataSource) generateEvents() {
 			typeIndex = (typeIndex + 1) % len(m.eventTypes)
 
 			event := common.NewEvent(eventType, "mock.event", "mock-datasource")
+			// 生成 TraceID 并绑定到事件
+			baseCtx := m.ownCtx
+			if baseCtx == nil {
+				baseCtx = context.Background()
+			}
+			traceID := common.GenerateTraceID(baseCtx)
+			ctx := common.ContextWithTraceID(baseCtx, traceID)
+			event.WithContext(ctx)
 			event.TypedPayload = &api.Event_Pod{
 				Pod: &api.PodEventPayload{
 					PodName:      fmt.Sprintf("mock-pod-%d", counter),

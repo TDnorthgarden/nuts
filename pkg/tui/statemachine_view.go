@@ -27,9 +27,8 @@ type StateMachineConfig struct {
 
 // StateConfig 状态配置
 type StateConfig struct {
-	Description  string `json:"description"`
-	StateTimeout string `json:"state_timeout"`
-	AutoRetry    bool   `json:"auto_retry"`
+	Description string `json:"description"`
+	AutoRetry   bool   `json:"auto_retry"`
 }
 
 // TransitionConfig 转换配置
@@ -92,9 +91,8 @@ func (v *StateMachineView) Refresh() tea.Cmd {
 			for name, stateData := range states {
 				if stateMap, ok := stateData.(map[string]interface{}); ok {
 					config.States[name] = StateConfig{
-						Description:  getString(stateMap, "description"),
-						StateTimeout: getString(stateMap, "state_timeout"),
-						AutoRetry:    getBool(stateMap, "auto_retry"),
+						Description: getString(stateMap, "description"),
+						AutoRetry:   getBool(stateMap, "auto_retry"),
 					}
 				}
 			}
@@ -157,8 +155,8 @@ States:
 
 	if v.config.States != nil {
 		for name, state := range v.config.States {
-			content += fmt.Sprintf("  %s: %s (state_timeout: %s, auto_retry: %v)\n",
-				name, state.Description, state.StateTimeout, state.AutoRetry)
+			content += fmt.Sprintf("  %s: %s (auto_retry: %v)\n",
+				name, state.Description, state.AutoRetry)
 		}
 	}
 

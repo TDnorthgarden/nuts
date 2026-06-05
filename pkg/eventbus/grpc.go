@@ -53,6 +53,11 @@ type GRPCEventBus struct {
 
 	// 等待所有 goroutine 退出
 	wg sync.WaitGroup
+
+	// 可配置参数
+	publishTimeout       time.Duration
+	subscriberSendTimeout time.Duration
+	subscriberBufferSize int
 }
 
 // Subscriber 订阅者信息
@@ -136,7 +141,7 @@ func (s *grpcServer) Subscribe(req *api.SubscribeRequest, stream api.EventBusSer
 	}
 
 	// 创建一个临时订阅者通道
-	ch := make(chan *common.Event, 100)
+	ch := make(chan *common.Event, s.bus.subscriberBufferSize)
 
 	sub := &Subscriber{
 		ID:       common.GenerateUUID(),
@@ -214,28 +219,49 @@ func (s *grpcServer) Subscribe(req *api.SubscribeRequest, stream api.EventBusSer
 
 // NewGRPCEventBusServer 创建gRPC EventBus服务端
 func NewGRPCEventBusServer(address string, serializer EventSerializer) (*GRPCEventBus, error) {
+	return NewGRPCEventBusServerWithConfig(&GRPCConfig{Address: address}, serializer)
+}
+
+// NewGRPCEventBusServerWithConfig 从完整配置创建gRPC EventBus服务端
+func NewGRPCEventBusServerWithConfig(cfg *GRPCConfig, serializer EventSerializer) (*GRPCEventBus, error) {
 	if serializer == nil {
 		serializer = NewProtobufSerializer()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// 解析可配置参数（使用默认值兜底）
+	publishTimeout := parseDurationOrDefault(cfg.PublishTimeout, 5*time.Second)
+	subscriberSendTimeout := parseDurationOrDefault(cfg.SubscriberSendTimeout, 100*time.Millisecond)
+	subscriberBufferSize := cfg.SubscriberBufferSize
+	if subscriberBufferSize <= 0 {
+		subscriberBufferSize = 100
+	}
+
 	bus := &GRPCEventBus{
-		address:     address,
+		address:     cfg.Address,
 		subscribers: make(map[string][]*Subscriber),
 		serializer:  serializer,
 		ctx:         ctx,
 		cancel:      cancel,
 		logger:      log.GetDefault(),
 		grpcSubCancel: make(map[string]context.CancelFunc),
+		publishTimeout:        publishTimeout,
+		subscriberSendTimeout: subscriberSendTimeout,
+		subscriberBufferSize:  subscriberBufferSize,
 	}
+
+	// 解析 keepalive 参数（使用默认值兜底）
+	maxIdle := parseDurationOrDefault(cfg.KeepaliveMaxIdle, 5*time.Minute)
+	keepaliveTime := parseDurationOrDefault(cfg.KeepaliveTime, 2*time.Hour)
+	keepaliveTimeout := parseDurationOrDefault(cfg.KeepaliveTimeout, 20*time.Second)
 
 	// 创建gRPC服务器
 	opts := []grpc.ServerOption{
 		grpc.KeepaliveParams(keepalive.ServerParameters{
-			MaxConnectionIdle: 5 * time.Minute,
-			Time:              2 * time.Hour,
-			Timeout:           20 * time.Second,
+			MaxConnectionIdle: maxIdle,
+			Time:              keepaliveTime,
+			Timeout:           keepaliveTimeout,
 		}),
 	}
 
@@ -300,6 +326,10 @@ func NewGRPCEventBusClient(address string, serializer EventSerializer) (*GRPCEve
 		cancel:      cancel,
 		logger:      log.GetDefault(),
 		grpcSubCancel: make(map[string]context.CancelFunc),
+		// 客户端默认值（与服务端一致）
+		publishTimeout:        5 * time.Second,
+		subscriberSendTimeout: 100 * time.Millisecond,
+		subscriberBufferSize:  100,
 	}
 
 	return bus, nil
@@ -358,7 +388,7 @@ func (b *GRPCEventBus) publishViaGRPC(topic string, event *common.Event) error {
 		ContentType: b.serializer.ContentType(),
 	}
 
-	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(b.ctx, b.publishTimeout)
 	defer cancel()
 
 	_, err = b.eventClient.Publish(ctx, req)
@@ -386,7 +416,7 @@ func (b *GRPCEventBus) publishLocal(topic string, event *common.Event) error {
 		case sub.Ch <- event:
 		case <-sub.Ctx.Done():
 			// 订阅者已取消，跳过
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(b.subscriberSendTimeout):
 			count := b.dropCount.Add(1)
 			if count <= 3 || count%1000 == 0 {
 				b.logger.Warn("GRPCEventBus: event dropped due to slow subscriber",
@@ -402,7 +432,7 @@ func (b *GRPCEventBus) publishLocal(topic string, event *common.Event) error {
 
 // Subscribe 订阅主题
 func (b *GRPCEventBus) Subscribe(topic string) <-chan *common.Event {
-	ch := make(chan *common.Event, 100)
+	ch := make(chan *common.Event, b.subscriberBufferSize)
 
 	if b.eventClient != nil {
 		// 客户端模式：建立gRPC流订阅，创建独立 subCtx 用于取消
@@ -683,7 +713,19 @@ func init() {
 			}
 
 			// 核心服务使用服务端模式
-			return NewGRPCEventBusServer(grpcCfg.Address, nil)
+			return NewGRPCEventBusServerWithConfig(grpcCfg, nil)
 		},
 	)
+}
+
+// parseDurationOrDefault 解析 duration 字符串，失败时返回默认值
+func parseDurationOrDefault(s string, defaultVal time.Duration) time.Duration {
+	if s == "" {
+		return defaultVal
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return defaultVal
+	}
+	return d
 }

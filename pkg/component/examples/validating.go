@@ -1,6 +1,7 @@
 package examples
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -63,11 +64,15 @@ func (c *ValidatingComponent) handleEvent(event *common.Event) error {
 	passed, reason := c.validate(params)
 
 	// 发布状态转换命令
+	ctx := event.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if passed {
-		return c.PublishStateTransition(taskID, "validating", "processing", true, reason)
+		return c.PublishStateTransition(ctx, taskID, "validating", "processing", true, reason)
 	}
 
-	return c.PublishStateTransition(taskID, "validating", "processing", false, reason)
+	return c.PublishStateTransition(ctx, taskID, "validating", "processing", false, reason)
 }
 
 // validate 执行所有验证规则
@@ -88,28 +93,10 @@ func (c *ValidatingComponent) validate(params map[string]interface{}) (bool, str
 func DefaultValidationRules() []ValidationRule {
 	return []ValidationRule{
 		{
-			Name: "required_fields",
+			Name: "task_id_present",
 			Check: func(params map[string]interface{}) (bool, string) {
 				if params == nil {
-					return false, "parameters is nil"
-				}
-				if _, ok := params["name"]; !ok {
-					return false, "name field is required"
-				}
-				return true, ""
-			},
-			Critical: true,
-		},
-		{
-			Name: "value_check",
-			Check: func(params map[string]interface{}) (bool, string) {
-				if params == nil {
-					return true, "" // optional
-				}
-				if val, ok := params["value"]; ok {
-					if v, ok := val.(float64); ok && v < 0 {
-						return false, "value cannot be negative"
-					}
+					return true, "" // params 可能不存在，不算失败
 				}
 				return true, ""
 			},

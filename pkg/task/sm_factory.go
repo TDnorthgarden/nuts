@@ -1,8 +1,6 @@
 package task
 
 import (
-	"time"
-
 	"github.com/sig-cloudnative/nuts/pkg/config"
 )
 
@@ -21,14 +19,10 @@ type StateMachineConfig struct {
 // StateConfig 状态配置
 type StateConfig struct {
 	Description  string `toml:"description,omitempty"`
-	StateTimeout string `toml:"state_timeout,omitempty"`
 	AutoRetry    bool   `toml:"auto_retry,omitempty"`
 	MaxRetries   int    `toml:"max_retries,omitempty"`
 	RetryToState string `toml:"retry_to_state,omitempty"`
 }
-
-// DefaultStateTimeout state_timeout 为空或 "0s" 时的默认超时时间
-const DefaultStateTimeout = 5 * time.Minute
 
 // TransitionConfig 状态转换配置
 type TransitionConfig struct {
@@ -90,13 +84,12 @@ func LoadStateMachineConfig(cfg config.ConfigManager) (*StateMachineConfig, erro
 	if statesMap, ok := smMap["states"].(map[string]interface{}); ok {
 		for name, cfg := range statesMap {
 			if stateCfg, ok := cfg.(map[string]interface{}); ok {
-				smConfig.States[name] = StateConfig{
-					Description:  getStringFromMap(stateCfg, "description", ""),
-					StateTimeout: getStringFromMap(stateCfg, "state_timeout", ""),
-					AutoRetry:    getBoolFromMap(stateCfg, "auto_retry", false),
-					MaxRetries:   getIntFromMap(stateCfg, "max_retries", 0),
-					RetryToState: getStringFromMap(stateCfg, "retry_to_state", ""),
-				}
+			smConfig.States[name] = StateConfig{
+				Description:  getStringFromMap(stateCfg, "description", ""),
+				AutoRetry:    getBoolFromMap(stateCfg, "auto_retry", false),
+				MaxRetries:   getIntFromMap(stateCfg, "max_retries", 0),
+				RetryToState: getStringFromMap(stateCfg, "retry_to_state", ""),
+			}
 			}
 		}
 	}

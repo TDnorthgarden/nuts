@@ -442,10 +442,10 @@ func (s *engineTaskStore) UpdateStateWithRecord(id string, state TaskState, trig
 	return nil
 }
 
-// TransitionState 原子化状态转换，在同一个锁周期内完成状态、历史、ArchivedAt、RetryCount 的更新。
+// TransitionState 原子化状态转换，在同一个锁周期内完成状态、历史、ArchivedAt、RetryCount、TimeoutAt 的更新。
 // postCommit 在状态持久化成功后调用（仍持有锁），用于发布事件等通知操作。
 // postCommit 失败不影响状态转换结果（store 是 source of truth，事件是 best-effort 通知）。
-func (s *engineTaskStore) TransitionState(id string, newState TaskState, triggeredBy, reason string, setArchivedAt *time.Time, clearArchived bool, setRetryCount *int, postCommit func() error) (*Task, error) {
+func (s *engineTaskStore) TransitionState(id string, newState TaskState, triggeredBy, reason string, setArchivedAt *time.Time, clearArchived bool, clearTimeout bool, setTimeoutAt *time.Time, setRetryCount *int, postCommit func() error) (*Task, error) {
 	lock := s.getKeyLock(id)
 	lock.Lock()
 	defer lock.Unlock()
@@ -490,6 +490,12 @@ func (s *engineTaskStore) TransitionState(id string, newState TaskState, trigger
 
 	if setRetryCount != nil {
 		task.RetryCount = *setRetryCount
+	}
+
+	if setTimeoutAt != nil {
+		task.TimeoutAt = setTimeoutAt
+	} else if clearTimeout {
+		task.TimeoutAt = nil
 	}
 
 	// 先持久化状态（store 是 source of truth）

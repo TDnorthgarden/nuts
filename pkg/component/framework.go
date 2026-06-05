@@ -166,13 +166,16 @@ func (c *BaseComponent) Info() ComponentInfo {
 }
 
 // PublishStateTransition 发布状态切换命令
-func (c *BaseComponent) PublishStateTransition(taskID, currentState, targetState string, success bool, message string) error {
-	// 构造状态切换命令事件
+func (c *BaseComponent) PublishStateTransition(ctx context.Context, taskID, currentState, targetState string, success bool, message string) error {
+	// 构造状态切换命令事件，使用传入的 ctx 保持 TraceID 连续性
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	event := common.NewEvent(
 		"StateTransitionCommand",
 		"state.transition.command",
 		c.info.Name,
-	).WithContext(context.Background())
+	).WithContext(ctx)
 	// 构建强类型 payload（必须使用 TypedPayload，ProtobufSerializer 只序列化 TypedPayload）
 	event.TypedPayload = &api.Event_Component{
 		Component: &api.ComponentEventPayload{
@@ -185,5 +188,8 @@ func (c *BaseComponent) PublishStateTransition(taskID, currentState, targetState
 		},
 	}
 	// 发布到 EventBus
-	return c.bus.Publish("state.transition.command", event)
+	if err := c.bus.Publish("state.transition.command", event); err != nil {
+		return fmt.Errorf("PublishStateTransition failed (task=%s %s->%s): %w", taskID, currentState, targetState, err)
+	}
+	return nil
 }

@@ -2,6 +2,7 @@ package datasource
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -55,6 +56,9 @@ func ParseNRIConfig(config interface{}) (DataSourceConfig, error) {
 				}
 			}
 		}
+		if v, ok := configMap["stop_timeout"].(int64); ok {
+			cfg.StopTimeout = int(v)
+		}
 	}
 
 	return cfg, nil
@@ -83,6 +87,12 @@ func (c *NRIConfig) Validate() error {
 	}
 	if c.BufferSize <= 0 {
 		c.BufferSize = 1000 // 设置默认值
+	}
+	if c.HealthCheckInterval == 0 {
+		c.HealthCheckInterval = 30 * time.Second
+	}
+	if c.ReconnectInterval == 0 {
+		c.ReconnectInterval = 5 * time.Second
 	}
 	return nil
 }

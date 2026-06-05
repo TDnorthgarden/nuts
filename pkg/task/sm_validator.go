@@ -94,35 +94,6 @@ func (cfg *StateMachineConfig) Validate() error {
 		}
 	}
 
-	// 有 StateTimeout 且 AutoRetry=false 的状态必须存在直达终态的转换
-	// 因为 handleTaskArchive 只尝试直接转换，不走多跳路径
-	for name, stateCfg := range cfg.States {
-		if terminalSet[name] {
-			continue
-		}
-		if stateCfg.AutoRetry {
-			continue
-		}
-		if !hasConfiguredStateTimeout(stateCfg.StateTimeout) {
-			continue
-		}
-		hasDirectTerminal := false
-		for _, target := range cfg.TerminalStates {
-			if cfg.IsTransitionAllowed(name, target) {
-				hasDirectTerminal = true
-				break
-			}
-		}
-		if !hasDirectTerminal {
-			return fmt.Errorf(
-				"state %q has state_timeout=%q and auto_retry=false, "+
-					"but no direct transition to any terminal state %v; "+
-					"add a transition like {from: %q, to: <terminal>, allowed: true}",
-				name, stateCfg.StateTimeout, cfg.TerminalStates, name,
-			)
-		}
-	}
-
 	cycles := findCycles(cfg.InitialState, graph)
 	for _, cycle := range cycles {
 		allNonTerminal := true
@@ -224,12 +195,6 @@ func normalizeCycle(cycle []string) []string {
 		result[i] = cycle[(minIdx+i)%len(cycle)]
 	}
 	return result
-}
-
-// hasConfiguredStateTimeout 检查状态是否显式配置了超时时间
-// 空字符串或 "0s" 表示未配置超时
-func hasConfiguredStateTimeout(raw string) bool {
-	return raw != "" && raw != "0s"
 }
 
 func uniqueCycles(cycles [][]string) [][]string {

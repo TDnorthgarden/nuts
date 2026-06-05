@@ -19,6 +19,7 @@ const (
 	ViewPolicies
 	ViewTasks
 	ViewDebug
+	ViewTraces
 	ViewHelp
 )
 
@@ -40,6 +41,10 @@ type App struct {
 	policyView     *PolicyView
 	taskView       *TaskView
 	debugView      *DebugView
+	traceView      *TraceView
+
+	// 导航历史
+	previousView ViewType
 
 	// 样式
 	styles *Styles
@@ -127,6 +132,7 @@ func NewAppWithToken(serverURL, token string) *App {
 		policyView:     NewPolicyView(client, styles),
 		taskView:       NewTaskView(client, styles),
 		debugView:      NewDebugView(client, styles),
+		traceView:      NewTraceView(client, styles),
 	}
 }
 
@@ -169,6 +175,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		_, cmd = a.taskView.Update(msg)
 	case ViewDebug:
 		_, cmd = a.debugView.Update(msg)
+	case ViewTraces:
+		_, cmd = a.traceView.Update(msg)
 	case ViewHelp:
 		// Help视图不处理消息
 	}
@@ -201,6 +209,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("5"))):
 			a.currentView = ViewDebug
 			return a, a.debugView.Refresh()
+		case key.Matches(msg, key.NewBinding(key.WithKeys("6"))):
+			a.currentView = ViewTraces
+			a.traceView.width = a.width
+			a.traceView.height = a.height
+			return a, a.traceView.EnterInput()
 		case key.Matches(msg, key.NewBinding(key.WithKeys("?"))):
 			if a.currentView != ViewHelp {
 				a.currentView = ViewHelp
@@ -226,6 +239,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_, cmd = a.taskView.Update(msg)
 		case ViewDebug:
 			_, cmd = a.debugView.Update(msg)
+		case ViewTraces:
+			_, cmd = a.traceView.Update(msg)
 		}
 
 	case tickMsg:
@@ -234,6 +249,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case error:
 		a.err = msg
+
+	case OpenTraceMsg:
+		a.previousView = a.currentView
+		a.traceView.SetTraceID(msg.TraceID)
+		a.traceView.width = a.width
+		a.traceView.height = a.height
+		a.currentView = ViewTraces
+		return a, a.traceView.Refresh()
+
+	case BackMsg:
+		if a.previousView != 0 {
+			a.currentView = a.previousView
+			a.previousView = ViewStatus
+		} else {
+			a.currentView = ViewTasks
+		}
+		return a, nil
 	}
 
 	var spinnerCmd tea.Cmd
@@ -255,6 +287,8 @@ func (a *App) refreshCurrentView() tea.Cmd {
 		return a.taskView.Refresh()
 	case ViewDebug:
 		return a.debugView.Refresh()
+	case ViewTraces:
+		return a.traceView.Refresh()
 	}
 	return nil
 }
@@ -284,6 +318,8 @@ func (a *App) View() string {
 		content = a.taskView.View()
 	case ViewDebug:
 		content = a.debugView.View()
+	case ViewTraces:
+		content = a.traceView.View()
 	case ViewHelp:
 		content = a.renderHelp()
 	}
@@ -321,6 +357,7 @@ func (a *App) renderMenu() string {
 		{"3", "Policies", ViewPolicies},
 		{"4", "Tasks", ViewTasks},
 		{"5", "Debug", ViewDebug},
+		{"6", "Traces", ViewTraces},
 		{"?", "Help", ViewHelp},
 		{"q", "Quit", -1},
 	}
@@ -353,6 +390,7 @@ Keyboard Shortcuts:
   3          - Policies View (View and manage policies)
   4          - Tasks View (Task list and history)
   5          - Debug View (Runtime debug info)
+  6          - Traces View (Event trace timeline)
   ?          - Toggle this help
 
 Navigation:

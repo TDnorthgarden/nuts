@@ -1,6 +1,7 @@
 package examples
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -86,12 +87,17 @@ func (c *FailoverComponent) handleEvent(event *common.Event) error {
 	// 获取当前重试次数
 	retryCount := c.getRetryCount(taskID)
 
+	ctx := event.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// 检查是否超过最大重试次数
 	if retryCount >= c.retryPolicy.MaxRetries {
 		fmt.Printf("[FailoverComponent] Task %s exceeded max retries (%d), marking as abandoned\n",
 			taskID, c.retryPolicy.MaxRetries)
 		c.resetRetryCount(taskID)
-		return c.PublishStateTransition(taskID, "failover", "abandoned", false, "max retries exceeded")
+		return c.PublishStateTransition(ctx, taskID, "failover", "abandoned", false, "max retries exceeded")
 	}
 
 	// 增加重试次数
@@ -106,7 +112,7 @@ func (c *FailoverComponent) handleEvent(event *common.Event) error {
 	// 延迟后发布状态转换命令（failover -> completed）
 	time.AfterFunc(delay, func() {
 		fmt.Printf("[FailoverComponent] Completing task %s (attempt %d)\n", taskID, newRetryCount)
-		if err := c.PublishStateTransition(taskID, "failover", "completed", true,
+		if err := c.PublishStateTransition(ctx, taskID, "failover", "completed", true,
 			fmt.Sprintf("failover handled, attempt %d", newRetryCount)); err != nil {
 			fmt.Printf("[FailoverComponent] Failed to publish transition: %v\n", err)
 		}

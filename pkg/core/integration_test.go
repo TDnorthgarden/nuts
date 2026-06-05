@@ -193,7 +193,7 @@ func TestTaskScheduler_FullLifecycle(t *testing.T) {
 	}
 
 	core.stateMachineEngine = task.NewDefaultStateMachineEngine(core.taskStore, smConfig, core.EventBus)
-	core.timeoutChecker = task.NewTimeoutChecker(core.taskStore, smConfig, 30*time.Second, 1)
+	core.timeoutChecker = task.NewTimeoutChecker(core.taskStore, 30*time.Second, 1)
 	core.timeoutChecker.SetOnTimeout(func(taskID string, currentState task.TaskState) {
 		core.handleTimeoutEvent(core.ctx, taskID, currentState)
 	})
@@ -277,7 +277,7 @@ func TestTaskScheduler_TimeoutAndArchive(t *testing.T) {
 		InitialState: "pending",
 		TerminalStates: []string{"failed"},
 		States: map[string]task.StateConfig{
-			"pending": {StateTimeout: "100ms"},
+			"pending": {},
 			"failed":  {},
 		},
 		Transitions: []task.TransitionConfig{
@@ -286,7 +286,8 @@ func TestTaskScheduler_TimeoutAndArchive(t *testing.T) {
 	}
 
 	core.stateMachineEngine = task.NewDefaultStateMachineEngine(core.taskStore, smConfig, core.EventBus)
-	core.timeoutChecker = task.NewTimeoutChecker(core.taskStore, smConfig, 200*time.Millisecond, 1)
+	core.Config.Set("task.default_timeout", "2s")
+	core.timeoutChecker = task.NewTimeoutChecker(core.taskStore, 200*time.Millisecond, 1)
 	core.timeoutChecker.SetOnTimeout(func(taskID string, currentState task.TaskState) {
 		core.handleTimeoutEvent(core.ctx, taskID, currentState)
 	})
@@ -302,10 +303,20 @@ func TestTaskScheduler_TimeoutAndArchive(t *testing.T) {
 		t.Fatalf("CreateTask failed: %v", err)
 	}
 
+	// 设置 TimeoutAt（原 state_timeout 功能已移除）
+	timeoutAt := time.Now().Add(100 * time.Millisecond)
+	tsk, err := core.taskStore.Get("timeout-archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsk.TimeoutAt = &timeoutAt
+	core.taskStore.Update(tsk)
+	core.timeoutChecker.Push(tsk.ID, *tsk.TimeoutAt)
+
 	time.Sleep(500 * time.Millisecond)
 
 	// Verify task was archived after timeout (no auto-retry)
-	tsk, err := core.taskStore.Get("timeout-archive")
+	tsk, err = core.taskStore.Get("timeout-archive")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +344,6 @@ func TestTaskScheduler_TimeoutAndRetry(t *testing.T) {
 		TerminalStates: []string{"failed"},
 		States: map[string]task.StateConfig{
 			"pending": {
-				StateTimeout: "100ms",
 				AutoRetry:    true,
 				MaxRetries:   3,
 				RetryToState: "pending",
@@ -347,7 +357,8 @@ func TestTaskScheduler_TimeoutAndRetry(t *testing.T) {
 	}
 
 	core.stateMachineEngine = task.NewDefaultStateMachineEngine(core.taskStore, smConfig, core.EventBus)
-	core.timeoutChecker = task.NewTimeoutChecker(core.taskStore, smConfig, 200*time.Millisecond, 1)
+	core.Config.Set("task.default_timeout", "1s")
+	core.timeoutChecker = task.NewTimeoutChecker(core.taskStore, 200*time.Millisecond, 1)
 	core.timeoutChecker.SetOnTimeout(func(taskID string, currentState task.TaskState) {
 		core.handleTimeoutEvent(core.ctx, taskID, currentState)
 	})
@@ -363,12 +374,22 @@ func TestTaskScheduler_TimeoutAndRetry(t *testing.T) {
 		t.Fatalf("CreateTask failed: %v", err)
 	}
 
+	// 设置 TimeoutAt（原 state_timeout 功能已移除）
+	timeoutAt := time.Now().Add(100 * time.Millisecond)
+	tsk, err := core.taskStore.Get("timeout-retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsk.TimeoutAt = &timeoutAt
+	core.taskStore.Update(tsk)
+	core.timeoutChecker.Push(tsk.ID, *tsk.TimeoutAt)
+
 	// Wait for multiple timeout + retry cycles + heap rebuild
 	// The exponential backoff (1s, 2s, 4s, ...) means retries space out quickly.
 	// We sleep long enough to see at least 2 retries and final archive.
 	time.Sleep(8500 * time.Millisecond)
 
-	tsk, err := core.taskStore.Get("timeout-retry")
+	tsk, err = core.taskStore.Get("timeout-retry")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -33,8 +33,8 @@ func (h *HTTPHandler) HandleDataSources(w http.ResponseWriter, r *http.Request) 
 
 	switch r.Method {
 	case http.MethodGet:
-		// 获取已注册的数据源列表
-		dsList := h.manager.List()
+		// 获取所有已注册的数据源类型及其激活状态
+		dsList := h.manager.ListAllWithStatus()
 		resp := common.Success(dsList)
 		json.NewEncoder(w).Encode(resp)
 
@@ -60,16 +60,32 @@ func (h *HTTPHandler) HandleDataSourceDetail(w http.ResponseWriter, r *http.Requ
 
 	switch r.Method {
 	case http.MethodGet:
-		wrapper, err := h.manager.GetWrapper(id)
-		if err != nil {
-			resp := common.Error(404, err.Error())
+		// 先检查是否是工厂支持的类型
+		supportedTypes := Factory.GetSupportedTypes()
+		isSupported := false
+		for _, t := range supportedTypes {
+			if t == id {
+				isSupported = true
+				break
+			}
+		}
+
+		if !isSupported {
+			resp := common.Error(404, fmt.Sprintf("datasource %s not found", id))
 			json.NewEncoder(w).Encode(resp)
 			return
+		}
+
+		// 检查是否已实例化
+		wrapper, err := h.manager.GetWrapper(id)
+		active := false
+		if err == nil {
+			active = wrapper.Active
 		}
 		// 返回实际状态：id 和是否 active
 		resp := common.Success(map[string]interface{}{
 			"id":     id,
-			"active": wrapper.Active,
+			"active": active,
 		})
 		json.NewEncoder(w).Encode(resp)
 
@@ -108,26 +124,28 @@ func (h *HTTPHandler) HandleDataSourceControl(w http.ResponseWriter, r *http.Req
 		json.NewEncoder(w).Encode(resp)
 
 	case "switch":
-		// 检查目标数据源是否存在
-		_, err := h.manager.Get(id)
+		previous, err := h.manager.SwitchTo(id)
 		if err != nil {
-			resp := common.Error(404, fmt.Sprintf("datasource %s not found", id))
-			json.NewEncoder(w).Encode(resp)
-			return
-		}
-
-		// 停止所有数据源
-		h.manager.StopAll()
-
-		// 启动目标数据源
-		if err := h.manager.StartByName(id); err != nil {
+			// 判断是否是"已激活"的情况
+			if strings.Contains(err.Error(), "already active") {
+				resp := common.Success(map[string]string{
+					"id":     id,
+					"action": "already_active",
+				})
+				json.NewEncoder(w).Encode(resp)
+				return
+			}
 			resp := common.ErrorWithCode(common.CodeInternalError, fmt.Sprintf("switch to datasource: %v", err))
 			w.WriteHeader(common.ErrorCodeToHTTPStatus(common.CodeInternalError))
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
 
-		resp := common.Success(map[string]string{"id": id, "action": "switched"})
+		resp := common.Success(map[string]string{
+			"id":       id,
+			"action":   "switched",
+			"previous": previous,
+		})
 		json.NewEncoder(w).Encode(resp)
 
 	default:

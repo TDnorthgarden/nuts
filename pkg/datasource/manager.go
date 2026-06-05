@@ -29,6 +29,9 @@ type DataSourceManager struct {
 	// 数据源工厂注册表
 	factories map[string]DataSourceFactoryFunc
 
+	// 配置管理器（用于惰性创建数据源实例）
+	cfg config.ConfigManager
+
 	// 日志记录器
 	logger log.Logger
 }
@@ -38,6 +41,12 @@ type DataSourceWrapper struct {
 	DataSource DataSource
 	Config     DataSourceConfig
 	Active     bool
+}
+
+// DatasourceInfo 数据源信息（用于API返回）
+type DatasourceInfo struct {
+	Name   string `json:"name"`
+	Active bool   `json:"active"`
 }
 
 // NewDataSourceManager 创建数据源管理器
@@ -124,6 +133,7 @@ func (m *DataSourceManager) Start(ctx context.Context) error {
 
 		wrapper.Active = true
 		m.sources[name] = wrapper
+		m.activeName = name
 		startedCount++
 		m.logger.Info("Datasource started", log.String("name", name))
 	}
@@ -222,6 +232,108 @@ func (m *DataSourceManager) Switch(fromName, toName string) error {
 	return nil
 }
 
+// SwitchTo 切换到指定数据源（支持惰性创建）
+// 如果目标数据源尚未注册，则从配置中惰性创建实例
+// 返回切换前的数据源名称
+func (m *DataSourceManager) SwitchTo(name string) (string, error) {
+	// 验证目标类型是否在工厂中注册
+	supportedTypes := Factory.GetSupportedTypes()
+	isSupported := false
+	for _, t := range supportedTypes {
+		if t == name {
+			isSupported = true
+			break
+		}
+	}
+	if !isSupported {
+		return "", fmt.Errorf("unknown datasource type: %s, supported: %v", name, supportedTypes)
+	}
+
+	// 惰性创建：如果不在 m.sources 中，从配置创建
+	if err := m.ensureRegistered(name); err != nil {
+		return "", fmt.Errorf("ensure datasource %s: %w", name, err)
+	}
+
+	// 记录切换前的活跃数据源
+	m.mu.RLock()
+	previous := m.activeName
+	// 如果 activeName 为空（Start() 可能在初始化时未设置），
+	// 遍历 m.sources 查找实际活跃的数据源
+	if previous == "" {
+		for name, wrapper := range m.sources {
+			if wrapper.Active {
+				previous = name
+				break
+			}
+		}
+	}
+	m.mu.RUnlock()
+
+	if previous == name {
+		return previous, fmt.Errorf("datasource %s already active", name)
+	}
+
+	// 停止旧数据源
+	if previous != "" {
+		if err := m.Stop(previous); err != nil {
+			return previous, fmt.Errorf("stop old datasource %s: %w", previous, err)
+		}
+	}
+
+	// 启动新数据源
+	if err := m.StartByName(name); err != nil {
+		return previous, fmt.Errorf("start new datasource %s: %w", name, err)
+	}
+
+	m.logger.Info("Datasource switched",
+		log.String("from", previous),
+		log.String("to", name))
+	return previous, nil
+}
+
+// ensureRegistered 确保数据源已注册，如果未注册则从配置惰性创建
+func (m *DataSourceManager) ensureRegistered(name string) error {
+	m.mu.RLock()
+	_, exists := m.sources[name]
+	m.mu.RUnlock()
+	if exists {
+		return nil // 已注册
+	}
+
+	if m.cfg == nil {
+		return fmt.Errorf("config manager not set, cannot lazily create datasource %s", name)
+	}
+
+	// 读取 [datasource.{name}] 配置
+	typeConfig := m.cfg.GetMap(fmt.Sprintf("datasource.%s", name))
+	if typeConfig == nil {
+		return fmt.Errorf("no config section [datasource.%s] found", name)
+	}
+
+	// 注入 type 和 name
+	typeConfig["type"] = name
+	typeConfig["name"] = name
+
+	// 工厂创建实例
+	ds, err := Factory.CreateWithMap(typeConfig)
+	if err != nil {
+		return fmt.Errorf("create datasource %s: %w", name, err)
+	}
+
+	// 设置 logger
+	if ls, ok := ds.(interface{ SetLogger(log.Logger) }); ok {
+		ls.SetLogger(m.logger)
+	}
+
+	// 注册到管理器
+	if err := m.Register(name, ds, nil); err != nil {
+		return fmt.Errorf("register datasource %s: %w", name, err)
+	}
+
+	m.logger.Info("Datasource lazily created and registered", log.String("name", name))
+	return nil
+}
+
 // StopAll 停止所有数据源
 func (m *DataSourceManager) StopAll() error {
 	m.mu.Lock()
@@ -301,7 +413,7 @@ func (m *DataSourceManager) GetWrapper(name string) (*DataSourceWrapper, error) 
 	return &wrapper, nil
 }
 
-// List 列出所有数据源
+// List 列出所有已实例化的数据源（仅返回名称列表）
 func (m *DataSourceManager) List() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -311,6 +423,25 @@ func (m *DataSourceManager) List() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// ListAllWithStatus 列出工厂中所有已注册的数据源类型及其激活状态
+// 工厂注册的类型全部列出，同时标记哪些已实例化且处于活跃状态
+func (m *DataSourceManager) ListAllWithStatus() []DatasourceInfo {
+	allTypes := Factory.GetSupportedTypes()
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]DatasourceInfo, 0, len(allTypes))
+	for _, t := range allTypes {
+		info := DatasourceInfo{Name: t, Active: false}
+		if wrapper, exists := m.sources[t]; exists && wrapper.Active {
+			info.Active = true
+		}
+		result = append(result, info)
+	}
+	return result
 }
 
 // GetActive 获取激活的数据源列表
@@ -431,6 +562,9 @@ func (m *DataSourceManager) CreateDataSource(dsType, name string, config map[str
 // Init 从配置初始化数据源
 // 统一接口：读取配置 -> 工厂创建 -> 注册
 func (m *DataSourceManager) Init(cfg config.ConfigManager) error {
+	// 保存配置管理器，用于后续惰性创建数据源
+	m.cfg = cfg
+
 	// 读取 [datasource] 配置
 	dsConfig := cfg.Get("datasource")
 	dsMap, ok := dsConfig.(map[string]interface{})
@@ -495,5 +629,3 @@ func (m *DataSourceManager) LoadAndStart(cfg config.ConfigManager) error {
 	}
 	return nil
 }
-
-

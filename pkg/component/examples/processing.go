@@ -1,6 +1,7 @@
 package examples
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -84,5 +85,9 @@ func (c *ProcessingComponent) handleEvent(event *common.Event) error {
 
 	// Pass-through: transition directly to failover
 	// The actual action execution happens in core.go's processing handler
-	return c.PublishStateTransition(taskID, "processing", "failover", true, "processing pass-through")
+	ctx := event.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return c.PublishStateTransition(ctx, taskID, "processing", "failover", true, "processing pass-through")
 }

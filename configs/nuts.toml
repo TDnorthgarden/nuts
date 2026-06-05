@@ -3,7 +3,15 @@
 
 [global]
 log_level = "debug"
-node_id = "nuts-node-01"
+
+[id]
+# ID 生成器类型: uuid / snowflake
+type = "uuid"
+
+[id.snowflake]
+# 雪花算法机器 ID（0-1023），分布式环境需唯一
+# type = "snowflake" 时生效
+machine_id = 0
 
 [log]
 # 日志输出配置
@@ -29,11 +37,11 @@ event_burst = 10
 [datasource]
 type = "mock"
 # 事件通道缓冲区大小
-event_channel_buffer_size = 10
+event_channel_buffer_size = 1000
 
 [datasource.mock]
 # mock数据源配置（不定义enabled，由CLI控制启停）
-event_interval_ms = 1000
+event_interval_ms = 5000
 
 #配置支持的事件
 event_types = ["ContainerStart", "ContainerStop", "ContainerUpdate"]
@@ -41,18 +49,30 @@ event_types = ["ContainerStart", "ContainerStop", "ContainerUpdate"]
 [datasource.nri]
 socket_path = "/var/run/nri/nri.sock"
 plugin_name = "00-nuts"
+plugin_index = 0
 events = ["RunPodSandbox", "StopPodSandbox", "StartContainer", "StopContainer", "RemoveContainer"]
 buffer_size = 1000
+# Stop 等待超时（秒）
+stop_timeout = 5
 
 [datasource.containerd]
 socket_path = "/run/containerd/containerd.sock"
 namespace = "k8s.io"
 events = ["TaskCreate", "TaskStart", "TaskExit", "TaskDelete"]
 buffer_size = 1000
+# Stop 等待超时（秒）
+stop_timeout = 5
+# 重连退避参数（秒）
+reconnect_initial_backoff = 1
+reconnect_max_backoff = 30
 
 [policy]
 # 策略引擎类型: cel / jsonlogic
 type = "cel"
+# 最大并发策略评估数
+max_concurrent_evaluations = 50
+# CEL 表达式评估超时（Go duration 格式）
+evaluation_timeout = "5s"
 
 # 策略存储配置
 [policy.db]
@@ -62,10 +82,8 @@ type = "sqlite"
 path = "data/policy.db"
 
 [scheduler]
-# 调度算法类型: default / priority
-# default: 先到先服务调度
-# priority: 按任务优先级调度
-type = "priority"
+# 策略匹配事件通道缓冲区大小
+policy_matched_buffer_size = 100
 
 [statemachine]
 # 状态机配置
@@ -79,41 +97,34 @@ terminal_states = ["completed", "failed", "abandoned"]
 # 状态定义
 [statemachine.states.pending]
 description = "Task is pending execution"
-state_timeout = "5s"
 auto_retry = false
 
 [statemachine.states.validating]
 description = "Task is being validated"
-state_timeout = "6s"
 auto_retry = true
 max_retries = 3
 retry_to_state = "validating"
 
 [statemachine.states.processing]
 description = "Task is being processed"
-state_timeout = "5s"
 auto_retry = true
 max_retries = 3
 retry_to_state = "processing"
 
 [statemachine.states.failover]
 description = "Task is in failover handling"
-state_timeout = "6s"
 auto_retry = false
 
 [statemachine.states.completed]
 description = "Task completed successfully"
-state_timeout = "0s"
 auto_retry = false
 
 [statemachine.states.failed]
 description = "Task failed"
-state_timeout = "0s"
 auto_retry = false
 
 [statemachine.states.abandoned]
 description = "Task abandoned after max retries"
-state_timeout = "0s"
 auto_retry = false
 
 # 转换规则（正向流程：pending -> validating -> processing -> failover -> completed）
@@ -122,7 +133,7 @@ from = "pending"
 to = "validating"
 allowed = true
 
-# pending 有 state_timeout=5s 且 auto_retry=false，必须存在直接到终态的转换
+# pending 的 auto_retry=false，必须存在直接到终态的转换
 [[statemachine.transitions]]
 from = "pending"
 to = "abandoned"
@@ -164,19 +175,16 @@ to = "abandoned"
 allowed = true
 
 
-[id]
-# ID生成器配置
-# type: uuid (默认) | snowflake
-type = "uuid"
-
-# 雪花算法配置（type = "snowflake" 时生效）
-[id.snowflake]
-machine_id = 1  # 节点ID，范围 0-1023，集群中每个节点必须唯一
-
 # 任务模块配置
 [task]
 # 最大并发任务数
 max_concurrent = 100
+# 默认超时（Go duration 格式），当 rule 未设置 timeout 时使用
+default_timeout = "30m"
+
+[task.retry]
+# 任务重试指数退避上限（秒）
+max_backoff_seconds = 60
 # 任务存储（单存储模型）
 [task.db]
 # 存储类型: memory / sqlite
@@ -197,6 +205,8 @@ cleanup_interval = "1h"
 [task.scheduler]
 # 超时检查间隔（支持 time.ParseDuration 格式: "30s", "1m"）
 timeout_check_interval = "3s"
+# 超时堆重建间隔（tick 数，每 N 次 check 后重建一次）
+timeout_rebuild_interval = 5
 
 # 事件总线配置
 [eventbus]
@@ -204,16 +214,20 @@ timeout_check_interval = "3s"
 # grpc: 通过 gRPC 与远程组件通信（需要同时运行外部组件进程）
 # noop: 空操作，独立模式（不配置 eventbus.type 时默认使用 noop，不启动 gRPC 服务）
 type = "grpc"
-# 订阅者通道缓冲区大小
-subscriber_channel_buffer_size = 100
-# 发布超时时间（秒）
-publish_timeout_seconds = 5
-# 最大并发分发器数量
-max_concurrent_dispatchers = 10
 
 [eventbus.grpc]
 address = "tcp://localhost:50051"
 #address = "unix:///data/usershare/repo/github/sig-cloudnative/nuts/grpc.sock"
+# gRPC keepalive 参数
+keepalive_max_idle = "5m"
+keepalive_time = "2h"
+keepalive_timeout = "20s"
+# gRPC Publish 超时
+publish_timeout = "5s"
+# 订阅者 channel 缓冲区大小
+subscriber_buffer_size = 100
+# 慢订阅者断开超时
+subscriber_send_timeout = "100ms"
 
 # 指标收集配置
 [metrics]
@@ -228,10 +242,22 @@ namespace = "nuts"
 [metrics.alert]
 # 是否启用告警
 enabled = true
-# 超时率阈值（次/秒），超过则输出 Error 日志
+# 超时率阈值（次/秒）
 timeout_rate_threshold = 10.0
-# 错误率阈值（次/秒），超过则输出 Error 日志
+# 错误率阈值（次/秒）
 error_rate_threshold = 20.0
+# 滑动窗口大小（秒）
+window_size_seconds = 60
+# 检查间隔（秒）
+check_interval_seconds = 10
+
+[shutdown]
+# 优雅关闭等待时间（秒）
+grace_period = 15
+# Tracer 关闭超时（秒）
+tracer_timeout = 5
+# HTTP 服务器关闭超时（秒）
+http_timeout = 5
 
 # 分布式追踪配置
 [tracing]
@@ -243,4 +269,24 @@ endpoint = "localhost:4317"
 service_name = "nuts"
 # 采样率 (0.0 ~ 1.0)
 sample_rate = 1.0
+
+# 事件日志配置
+[eventlog]
+# 类型: disabled / memory / db
+# disabled: 不启用（默认）
+# memory: 内存环形缓冲区（调试用）
+# db: 持久化存储（推荐生产环境）
+type = "db"
+# 内存模式缓冲区大小
+buffer_size = 10000
+# 日志保留时长（小时），0 表示不清理
+retention_hours = 72
+# 清理间隔
+cleanup_interval = "1h"
+
+[eventlog.db]
+# 存储类型: sqlite
+type = "sqlite"
+# 数据库路径
+path = "data/eventlog.db"
 

@@ -3,7 +3,6 @@ package task
 import (
 	"container/heap"
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -39,7 +38,6 @@ type TimeoutCallback func(taskID string, currentState TaskState)
 // 定期扫描超时任务，通过回调通知超时事件
 type TimeoutChecker struct {
 	store         TaskStore
-	config        *StateMachineConfig
 	checkInterval time.Duration
 	logger        log.Logger
 	metrics       common.MetricsRecorder
@@ -57,7 +55,7 @@ type TimeoutChecker struct {
 
 // NewTimeoutChecker 创建超时检查器
 // rebuildInterval 为重建堆的节拍数（每 N 次 check 重建一次），<=0 时使用默认值 5
-func NewTimeoutChecker(store TaskStore, config *StateMachineConfig, interval time.Duration, rebuildInterval int) *TimeoutChecker {
+func NewTimeoutChecker(store TaskStore, interval time.Duration, rebuildInterval int) *TimeoutChecker {
 	if interval == 0 {
 		interval = 30 * time.Second // 默认 30 秒
 	}
@@ -65,12 +63,11 @@ func NewTimeoutChecker(store TaskStore, config *StateMachineConfig, interval tim
 		rebuildInterval = 5
 	}
 	return &TimeoutChecker{
-		store:         store,
-		config:        config,
-		checkInterval: interval,
-		logger:        log.GetDefault(),
-		heapStale:     true,
-		rebuildInterval: rebuildInterval,
+		store:            store,
+		checkInterval:    interval,
+		logger:           log.GetDefault(),
+		heapStale:        true,
+		rebuildInterval:  rebuildInterval,
 	}
 }
 
@@ -201,38 +198,32 @@ func (c *TimeoutChecker) checkTimeoutsAndGetNextWake() time.Duration {
 	return nextWake
 }
 
-// rebuildHeap 重建超时堆：扫描所有活跃任务并计算超时时间
+// Push 将任务直接插入堆（创建任务或设置新 TimeoutAt 后调用）
+func (c *TimeoutChecker) Push(taskID string, deadline time.Time) {
+	c.heapMu.Lock()
+	heap.Push(&c.heap, heapEntry{deadline: deadline, taskID: taskID})
+	c.heapMu.Unlock()
+}
+
+// rebuildHeap 重建超时堆：扫描所有活跃任务，按 TimeoutAt 建堆
 func (c *TimeoutChecker) rebuildHeap() {
 	now := time.Now()
-
-	// 收集所有配置了 timeout 的状态
-	stateTimeouts := make(map[TaskState]time.Duration)
-	for name, stateCfg := range c.config.States {
-		if stateCfg.StateTimeout == "" {
-			continue
-		}
-		d := parseStateTimeout(stateCfg.StateTimeout)
-		if d > 0 {
-			stateTimeouts[TaskState(name)] = d
-		}
+	tasks, err := c.store.List(TaskFilter{IncludeArchived: false})
+	if err != nil {
+		c.logger.Error("rebuildHeap: list tasks failed", log.Error(err))
+		return
 	}
 
 	newHeap := make(timeoutHeap, 0)
-
-	for state, timeout := range stateTimeouts {
-		tasks, err := c.store.List(TaskFilter{State: state})
-		if err != nil {
-			c.logger.Error("rebuildHeap: failed to list tasks", log.String("state", string(state)), log.Error(err))
+	for _, task := range tasks {
+		if task.TimeoutAt == nil {
 			continue
 		}
-
-		for _, task := range tasks {
-			deadline := c.taskDeadline(task, now, timeout)
-			if deadline == nil {
-				continue
-			}
-			newHeap = append(newHeap, heapEntry{deadline: *deadline, taskID: task.ID})
+		deadline := *task.TimeoutAt
+		if deadline.Before(now) {
+			deadline = now // 已过期 → 立即触发 check
 		}
+		newHeap = append(newHeap, heapEntry{deadline: deadline, taskID: task.ID})
 	}
 
 	heap.Init(&newHeap)
@@ -243,44 +234,9 @@ func (c *TimeoutChecker) rebuildHeap() {
 	c.heapStale = false
 }
 
-// taskDeadline 计算任务的超时截止时间
-func (c *TimeoutChecker) taskDeadline(task *Task, now time.Time, stateTimeout time.Duration) *time.Time {
-	if task.ArchivedAt != nil {
-		return nil
-	}
-	if task.TimeoutAt != nil {
-		return task.TimeoutAt
-	}
-	deadline := task.StateUpdatedAt.Add(stateTimeout)
-	if deadline.Before(now) {
-		// 已经超时，deadline = now，确保本次 check 能立即处理
-		return &now
-	}
-	return &deadline
-}
-
-// isTaskTimeout 检查任务是否超时
+// isTaskTimeout 检查任务是否超时：只检查 TimeoutAt
 func (c *TimeoutChecker) isTaskTimeout(task *Task, now time.Time) bool {
-	// 如果设置了 TimeoutAt，直接比较
-	if task.TimeoutAt != nil && now.After(*task.TimeoutAt) {
-		return true
-	}
-
-	// 如果没有设置 TimeoutAt，使用状态配置的 timeout
-	stateCfg, ok := c.config.States[string(task.State)]
-	if !ok || stateCfg.StateTimeout == "" {
-		return false
-	}
-
-	// 解析 state_timeout 字符串，"0s" 回退到默认值
-	timeout := parseStateTimeout(stateCfg.StateTimeout)
-	if timeout <= 0 {
-		return false
-	}
-
-	// 检查是否超时
-	elapsed := now.Sub(task.StateUpdatedAt)
-	return elapsed > timeout
+	return task.TimeoutAt != nil && now.After(*task.TimeoutAt)
 }
 
 // GetTaskTimeout 获取任务的超时时间
@@ -289,37 +245,8 @@ func (c *TimeoutChecker) GetTaskTimeout(taskID string) (*time.Time, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	if task.TimeoutAt != nil {
 		return task.TimeoutAt, nil
 	}
-
-	// 根据状态配置计算超时时间
-	stateCfg, ok := c.config.States[string(task.State)]
-	if !ok || stateCfg.StateTimeout == "" {
-		return nil, fmt.Errorf("no state_timeout configured for state %s", task.State)
-	}
-
-	timeout := parseStateTimeout(stateCfg.StateTimeout)
-	if timeout <= 0 {
-		return nil, fmt.Errorf("invalid state_timeout for state %s: %s", task.State, stateCfg.StateTimeout)
-	}
-
-	timeoutAt := task.StateUpdatedAt.Add(timeout)
-	return &timeoutAt, nil
-}
-
-// parseStateTimeout 解析 state_timeout 字符串，空字符串或 "0s" 回退到 DefaultStateTimeout
-func parseStateTimeout(raw string) time.Duration {
-	if raw == "" || raw == "0s" {
-		return DefaultStateTimeout
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil || d <= 0 {
-		log.GetDefault().Warn("parseStateTimeout: invalid state_timeout value, using default",
-			log.String("raw", raw),
-			log.String("default", DefaultStateTimeout.String()))
-		return DefaultStateTimeout
-	}
-	return d
+	return nil, nil
 }

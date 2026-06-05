@@ -153,7 +153,20 @@ func (f *EventBusFactory) GetSupportedTypes() []string {
 type GRPCConfig struct {
 	Type    string `toml:"type"`
 	Address string `toml:"address"`
-	// TODO: 添加TLS等配置
+
+	// Keepalive 参数
+	KeepaliveMaxIdle string `toml:"keepalive_max_idle"`
+	KeepaliveTime    string `toml:"keepalive_time"`
+	KeepaliveTimeout string `toml:"keepalive_timeout"`
+
+	// Publish 超时
+	PublishTimeout string `toml:"publish_timeout"`
+
+	// 订阅者 channel 缓冲区大小
+	SubscriberBufferSize int `toml:"subscriber_buffer_size"`
+
+	// 慢订阅者断开超时
+	SubscriberSendTimeout string `toml:"subscriber_send_timeout"`
 }
 
 // ParseGRPCConfig 解析gRPC配置

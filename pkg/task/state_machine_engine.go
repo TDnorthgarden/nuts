@@ -8,6 +8,7 @@ import (
 	"github.com/sig-cloudnative/nuts/api"
 	"github.com/sig-cloudnative/nuts/pkg/common"
 	"github.com/sig-cloudnative/nuts/pkg/eventbus"
+	"github.com/sig-cloudnative/nuts/pkg/eventlog"
 	"github.com/sig-cloudnative/nuts/pkg/log"
 )
 
@@ -50,7 +51,8 @@ type TransitionCommand struct {
 	TargetState   TaskState
 	Result        *CommandResult
 	ComponentInfo ComponentInfo
-	SetRetryCount *int // 可选：设置任务重试次数（原子化，与状态转换一起提交）
+	SetRetryCount *int       // 可选：原子化设置重试次数
+	SetTimeoutAt  *time.Time // 可选：原子化设置新 TimeoutAt
 }
 
 // CommandResult 命令执行结果
@@ -75,6 +77,7 @@ type DefaultStateMachineEngine struct {
 	logger                log.Logger
 	payloadBuilderFactory *PayloadBuilderFactory
 	metrics               common.MetricsRecorder
+	eventLog              eventlog.EventLog
 }
 
 // NewDefaultStateMachineEngine 创建默认状态机引擎
@@ -101,6 +104,11 @@ func (e *DefaultStateMachineEngine) SetLogger(logger log.Logger) {
 // SetMetrics 设置度量收集器
 func (e *DefaultStateMachineEngine) SetMetrics(m common.MetricsRecorder) {
 	e.metrics = m
+}
+
+// SetEventLog 设置事件日志
+func (e *DefaultStateMachineEngine) SetEventLog(el eventlog.EventLog) {
+	e.eventLog = el
 }
 
 // CreateTask 创建任务并启动状态机
@@ -141,6 +149,7 @@ func (e *DefaultStateMachineEngine) CreateTask(ctx context.Context, spec TaskSpe
 		Description: spec.Description,
 		Priority:    spec.Priority,
 		Metadata:    metadata,
+		TraceID:     metadata["trace_id"], // 从 metadata 继承 TraceID
 		// 初始化重试计数
 		RetryCount: 0, // 初始重试次数为0
 	}
@@ -180,7 +189,7 @@ func (e *DefaultStateMachineEngine) HandleTransitionCommand(ctx context.Context,
 	// 2. 如果任务已在目标状态，仅处理 SetRetryCount 后返回（幂等）
 	if task.State == cmd.TargetState {
 		if cmd.SetRetryCount != nil {
-			_, err := e.store.TransitionState(cmd.TaskID, task.State, "system", "retry count update", nil, false, cmd.SetRetryCount, nil)
+			_, err := e.store.TransitionState(cmd.TaskID, task.State, "system", "retry count update", nil, false, false, nil, cmd.SetRetryCount, nil)
 			if err != nil {
 				return fmt.Errorf("update retry count: %w", err)
 			}
@@ -235,20 +244,45 @@ func (e *DefaultStateMachineEngine) HandleTransitionCommand(ctx context.Context,
 	now := time.Now()
 	var setArchivedAt *time.Time
 	clearArchived := false
-	if e.config.IsTerminalState(string(cmd.TargetState)) {
+	isTerminal := e.config.IsTerminalState(string(cmd.TargetState))
+	if isTerminal {
 		setArchivedAt = &now
 	} else if task.ArchivedAt != nil {
 		clearArchived = true
 	}
 
+	// 推导 TimeoutAt 行为
+	clearTimeout := false
+	var setTimeoutAt *time.Time
+	if cmd.SetTimeoutAt != nil {
+		setTimeoutAt = cmd.SetTimeoutAt
+	} else if !isTerminal && task.TimeoutAt != nil && task.TimeoutAt.Before(now) {
+		clearTimeout = true
+	}
+
 	postCommit := func() error {
+		// EventLog: 任务状态变更
+		if e.eventLog != nil {
+			e.eventLog.Append(ctx, &eventlog.EventLogEntry{
+				ID:        common.GenerateUUID(),
+				TraceID:   common.TraceIDFromContext(ctx),
+				Stage:     eventlog.StageTaskState,
+				EventType: "TaskStateChanged",
+				Topic:     topic,
+				Source:    "state-machine-engine",
+				Timestamp: time.Now(),
+				TaskID:    cmd.TaskID,
+				OldState:  string(cmd.CurrentState),
+				NewState:  string(cmd.TargetState),
+			})
+		}
 		if e.eventBus != nil {
 			return e.eventBus.Publish(topic, event)
 		}
 		return nil
 	}
 
-	t, err := e.store.TransitionState(cmd.TaskID, cmd.TargetState, triggeredBy, reason, setArchivedAt, clearArchived, cmd.SetRetryCount, postCommit)
+	t, err := e.store.TransitionState(cmd.TaskID, cmd.TargetState, triggeredBy, reason, setArchivedAt, clearArchived, clearTimeout, setTimeoutAt, cmd.SetRetryCount, postCommit)
 	if err != nil {
 		if e.metrics != nil {
 			e.metrics.TaskError()

@@ -32,6 +32,7 @@ type Task struct {
 
 	CreatedAt     time.Time         `json:"created_at"`
 	Metadata      map[string]string `json:"metadata"`
+	TraceID       string            `json:"trace_id,omitempty"`
 }
 
 // TaskItem 任务列表项
@@ -152,6 +153,11 @@ type taskHistoryUpdatedMsg struct {
 	tasks []Task
 }
 
+// OpenTraceMsg 打开追踪视图消息
+type OpenTraceMsg struct {
+	TraceID string
+}
+
 // Update 更新视图
 func (v *TaskView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -180,9 +186,22 @@ func (v *TaskView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if v.selected != nil {
-			if msg.String() == "esc" {
+			switch msg.String() {
+			case "esc":
 				v.selected = nil
 				return v, nil
+			case "t":
+				// 获取 trace_id 并发送消息切换到 TraceView
+				traceID := v.selected.TraceID
+				if traceID == "" && v.selected.Metadata != nil {
+					traceID = v.selected.Metadata["trace_id"]
+				}
+				if traceID != "" {
+					v.selected = nil
+					return v, func() tea.Msg {
+						return OpenTraceMsg{TraceID: traceID}
+					}
+				}
 			}
 		} else {
 			switch msg.String() {
@@ -372,6 +391,16 @@ Metadata:
 		detail += "  (no metadata)\n"
 	}
 
+	// 显示 TraceID
+	traceID := task.TraceID
+	if traceID == "" && task.Metadata != nil {
+		traceID = task.Metadata["trace_id"]
+	}
+	if traceID != "" {
+		detail += fmt.Sprintf("\nTraceID:  %s\n", traceID)
+		detail += "Press 't' to view trace timeline\n"
+	}
+
 	detail += "\nPress Esc to go back"
 
 	return v.styles.Content.Render(detail)
@@ -380,9 +409,23 @@ Metadata:
 // parseTask 解析任务数据
 func parseTask(data map[string]interface{}) Task {
 	task := Task{
-		ID:    getString(data, "id"),
-		Name:  getString(data, "name"),
-		State: getString(data, "state"),
+		ID:      getString(data, "id"),
+		Name:    getString(data, "name"),
+		State:   getString(data, "state"),
+		TraceID: getString(data, "trace_id"),
+	}
+
+	// 从 metadata 中获取 trace_id（API 可能放在 metadata 里）
+	if task.TraceID == "" {
+		if metadata, ok := data["metadata"].(map[string]interface{}); ok {
+			task.TraceID = getString(metadata, "trace_id")
+			task.Metadata = make(map[string]string)
+			for k, v := range metadata {
+				if s, ok := v.(string); ok {
+					task.Metadata[k] = s
+				}
+			}
+		}
 	}
 
 	return task

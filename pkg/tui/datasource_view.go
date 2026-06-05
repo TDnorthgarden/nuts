@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -11,25 +12,24 @@ import (
 type DatasourceView struct {
 	client      *HTTPClient
 	styles      *Styles
-	datasources []Datasource
+	datasources []DatasourceInfo
+	cursor      int // 列表光标位置
 	selected    *DatasourceDetail
 	width       int
 	height      int
 	loading     bool
 }
 
-// Datasource 数据源结构
-type Datasource struct {
-	ID     string `json:"id"`
+// DatasourceInfo 数据源信息（匹配 API 返回的 {name, active} 格式）
+type DatasourceInfo struct {
 	Name   string `json:"name"`
-	Type   string `json:"type"`
-	Status string `json:"status"`
+	Active bool   `json:"active"`
 }
 
 // DatasourceDetail 数据源详情
 type DatasourceDetail struct {
 	ID     string
-	Status string
+	Active bool
 }
 
 // NewDatasourceView 创建数据源视图
@@ -58,23 +58,32 @@ func (v *DatasourceView) Refresh() tea.Cmd {
 			return fmt.Errorf("api error: %s", resp.Message)
 		}
 
-		// 解析数据 - API 返回的是字符串数组 ["mock"]
-		var datasources []Datasource
+		// API 返回 [{name, active}, ...] 格式
+		var datasources []DatasourceInfo
 		data, ok := resp.Data.([]interface{})
 		if !ok {
-			return datasourcesUpdatedMsg{datasources: []Datasource{}}
+			return datasourcesUpdatedMsg{datasources: []DatasourceInfo{}}
 		}
 
-		for _, ds := range data {
-			dsName, ok := ds.(string)
+		for _, item := range data {
+			dsMap, ok := item.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			datasources = append(datasources, Datasource{
-				ID:     dsName,
-				Name:   dsName + " Datasource",
-				Type:   dsName,
-				Status: "active",
+
+			name := getString(dsMap, "name")
+			if name == "" {
+				continue
+			}
+
+			active := false
+			if a, ok := dsMap["active"]; ok {
+				active, _ = a.(bool)
+			}
+
+			datasources = append(datasources, DatasourceInfo{
+				Name:   name,
+				Active: active,
 			})
 		}
 
@@ -96,11 +105,15 @@ func (v *DatasourceView) RefreshStatus(id string) tea.Cmd {
 
 		data, ok := resp.Data.(map[string]interface{})
 		if !ok {
-			return datasourceStatusUpdatedMsg{detail: &DatasourceDetail{ID: id, Status: "unknown"}}
+			return datasourceStatusUpdatedMsg{detail: &DatasourceDetail{ID: id}}
 		}
 
-		status := getString(data, "status")
-		return datasourceStatusUpdatedMsg{detail: &DatasourceDetail{ID: id, Status: status}}
+		active := false
+		if a, ok := data["active"]; ok {
+			active, _ = a.(bool)
+		}
+
+		return datasourceStatusUpdatedMsg{detail: &DatasourceDetail{ID: id, Active: active}}
 	}
 }
 
@@ -111,7 +124,7 @@ func (v *DatasourceView) DisableDatasource(id string) tea.Cmd {
 		if err != nil {
 			return err
 		}
-		return v.RefreshStatus(id)
+		return v.Refresh()
 	}
 }
 
@@ -122,13 +135,13 @@ func (v *DatasourceView) SwitchDatasource(id string) tea.Cmd {
 		if err != nil {
 			return err
 		}
-		return v.RefreshStatus(id)
+		return v.Refresh()
 	}
 }
 
 // datasourcesUpdatedMsg 数据源更新消息
 type datasourcesUpdatedMsg struct {
-	datasources []Datasource
+	datasources []DatasourceInfo
 }
 
 // datasourceStatusUpdatedMsg 数据源状态更新消息
@@ -144,7 +157,7 @@ func (v *DatasourceView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.loading = false
 	case datasourceStatusUpdatedMsg:
 		if v.selected != nil && v.selected.ID == msg.detail.ID {
-			v.selected.Status = msg.detail.Status
+			v.selected = msg.detail
 		}
 	case tea.WindowSizeMsg:
 		v.width = msg.Width
@@ -154,20 +167,31 @@ func (v *DatasourceView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "esc":
 				v.selected = nil
-			case "d":
+				return v, v.Refresh()
+			case "d", "D":
 				return v, v.DisableDatasource(v.selected.ID)
-			case "s":
-				return v, v.SwitchDatasource(v.selected.ID)
-			case "D":
-				return v, v.DisableDatasource(v.selected.ID)
-			case "S":
+			case "s", "S":
 				return v, v.SwitchDatasource(v.selected.ID)
 			}
 		} else {
-			// 选择数据源
-			if len(v.datasources) > 0 && msg.String() == "enter" {
-				v.selected = &DatasourceDetail{ID: v.datasources[0].ID}
-				return v, v.RefreshStatus(v.selected.ID)
+			switch msg.String() {
+			case "up", "k":
+				if v.cursor > 0 {
+					v.cursor--
+				}
+			case "down", "j":
+				if v.cursor < len(v.datasources)-1 {
+					v.cursor++
+				}
+			case "enter":
+				if len(v.datasources) > 0 {
+					sel := v.datasources[v.cursor]
+					v.selected = &DatasourceDetail{
+						ID:     sel.Name,
+						Active: sel.Active,
+					}
+					return v, v.RefreshStatus(sel.Name)
+				}
 			}
 		}
 	}
@@ -186,27 +210,34 @@ func (v *DatasourceView) View() string {
 
 	header := v.styles.Header.Render(" Datasources")
 
-	content := fmt.Sprintf(`
-ID              Name            Type            Status
-─────────────────────────────────────────────────────────────
-`)
+	// 表格头
+	tableHeader := fmt.Sprintf("%-4s %-20s %s\n", "", "Name", "Status")
+	separator := strings.Repeat("─", 60) + "\n"
+
+	content := tableHeader + separator
 
 	if len(v.datasources) == 0 {
-		content += "No datasources configured"
+		content += "No datasources registered"
 	} else {
-		for _, ds := range v.datasources {
-			statusStyle := v.styles.Info
-			if ds.Status == "active" {
-				statusStyle = v.styles.Success
-			} else if ds.Status == "disabled" {
-				statusStyle = v.styles.Error
+		for i, ds := range v.datasources {
+			cursor := "  " // 未选中
+			if i == v.cursor {
+				cursor = v.styles.Success.Render("▶ ")
 			}
-			content += fmt.Sprintf("%-15s %-15s %-15s %s\n",
-				ds.ID, ds.Name, ds.Type, statusStyle.Render(ds.Status))
+
+			statusStr := "inactive"
+			statusStyle := v.styles.Info
+			if ds.Active {
+				statusStr = "active"
+				statusStyle = v.styles.Success
+			}
+
+			content += fmt.Sprintf("%s%-20s %s\n",
+				cursor, ds.Name, statusStyle.Render(statusStr))
 		}
 	}
 
-	content += "\nPress Enter to view details"
+	content += "\n↑↓ Navigate  Enter View Details  Esc Back"
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -217,25 +248,25 @@ ID              Name            Type            Status
 
 // renderDetail 渲染详情
 func (v *DatasourceView) renderDetail() string {
+	statusStr := "inactive"
 	statusStyle := v.styles.Info
-	if v.selected.Status == "active" {
+	if v.selected.Active {
+		statusStr = "active"
 		statusStyle = v.styles.Success
-	} else if v.selected.Status == "disabled" {
-		statusStyle = v.styles.Error
 	}
 
 	detail := fmt.Sprintf(`
 Datasource Details
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ID:     %s
+Name:   %s
 Status: %s
 
 Actions:
   [d] Disable
   [s] Switch
   [Esc] Back to list
-`, v.selected.ID, statusStyle.Render(v.selected.Status))
+`, v.selected.ID, statusStyle.Render(statusStr))
 
 	return v.styles.Content.Render(detail)
 }

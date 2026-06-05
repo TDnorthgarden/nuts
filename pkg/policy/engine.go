@@ -177,10 +177,10 @@ func (e *DefaultPolicyEngine) evaluatePolicy(ctx context.Context, policy *Policy
 	if err != nil {
 		return &PolicyMatch{
 			PolicyID:  policy.ID,
-			Command:   policy.Command,
 			Matched:   false,
 			Error:     err,
 			Expansion: policy.Expansion,
+			Timeout:   policy.Timeout,
 		}
 	}
 
@@ -189,19 +189,19 @@ func (e *DefaultPolicyEngine) evaluatePolicy(ctx context.Context, policy *Policy
 	if err != nil {
 		return &PolicyMatch{
 			PolicyID:  policy.ID,
-			Command:   policy.Command,
 			Matched:   false,
 			Error:     err,
 			Expansion: policy.Expansion,
+			Timeout:   policy.Timeout,
 		}
 	}
 
 	return &PolicyMatch{
 		PolicyID:       policy.ID,
-		Command:        policy.Command,
 		Matched:        matched,
 		EvaluationTime: time.Since(evalStart).Milliseconds(),
 		Expansion:      policy.Expansion,
+		Timeout:        policy.Timeout,
 	}
 }
 
@@ -249,6 +249,16 @@ func (e *DefaultPolicyEngine) Init(cfg config.ConfigManager) error {
 		return fmt.Errorf("create DSL engine: %w", err)
 	}
 	e.logger.Info("DSL engine created", log.String("type", dslEngine.GetType()))
+
+	// 配置评估超时（仅对支持的引擎生效）
+	if v := cfg.GetString("policy.evaluation_timeout"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			if setter, ok := dslEngine.(interface{ SetEvaluationTimeout(time.Duration) }); ok {
+				setter.SetEvaluationTimeout(d)
+				e.logger.Info("Evaluation timeout configured", log.String("timeout", v))
+			}
+		}
+	}
 
 	// 注册 DSL 引擎到管理器
 	e.manager.RegisterEngine(dslEngine)

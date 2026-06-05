@@ -3,9 +3,11 @@ package common
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/sig-cloudnative/nuts/api"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type contextKey string
@@ -26,6 +28,18 @@ func TraceIDFromContext(ctx context.Context) string {
 		return id
 	}
 	return ""
+}
+
+// GenerateTraceID 生成 TraceID
+// 优先从 OTel SpanContext 提取，降级为 UUID（去除连字符，统一 32-hex 格式）
+func GenerateTraceID(ctx context.Context) string {
+	if ctx != nil {
+		span := oteltrace.SpanFromContext(ctx)
+		if span.SpanContext().IsValid() {
+			return span.SpanContext().TraceID().String()
+		}
+	}
+	return strings.ReplaceAll(GenerateUUID(), "-", "")
 }
 
 // 事件主题常量

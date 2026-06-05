@@ -16,8 +16,9 @@ const defaultCELTimeout = 5 * time.Second
 
 // CEngine CEL引擎实现
 type CEngine struct {
-	env *cel.Env
-	mu  sync.RWMutex
+	env              *cel.Env
+	mu               sync.RWMutex
+	evaluationTimeout time.Duration
 }
 
 // NewCEngine 创建CEL引擎
@@ -30,7 +31,7 @@ func NewCEngine() (*CEngine, error) {
 		return nil, fmt.Errorf("create CEL env: %w", err)
 	}
 
-	return &CEngine{env: env}, nil
+	return &CEngine{env: env, evaluationTimeout: defaultCELTimeout}, nil
 }
 
 // Compile 编译CEL表达式
@@ -86,6 +87,13 @@ func (e *CEngine) Evaluate(program DSLProgram, data map[string]interface{}) (boo
 	return bool(result), nil
 }
 
+// SetEvaluationTimeout 设置评估超时
+func (e *CEngine) SetEvaluationTimeout(d time.Duration) {
+	if d > 0 {
+		e.evaluationTimeout = d
+	}
+}
+
 // EvaluateWithCtx 带 context 的评估表达式
 func (e *CEngine) EvaluateWithCtx(ctx context.Context, program DSLProgram, data map[string]interface{}) (bool, error) {
 	celProg, ok := program.(*CELProgram)
@@ -93,8 +101,8 @@ func (e *CEngine) EvaluateWithCtx(ctx context.Context, program DSLProgram, data 
 		return false, fmt.Errorf("invalid program type")
 	}
 
-	// 从 context 获取超时，默认 5s
-	timeout := defaultCELTimeout
+	// 从 context 获取超时，使用引擎配置的超时
+	timeout := e.evaluationTimeout
 	if deadline, ok := ctx.Deadline(); ok {
 		if t := time.Until(deadline); t > 0 {
 			timeout = t

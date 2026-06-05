@@ -22,6 +22,10 @@ type NRIConfig struct {
 	PluginIndex string   `toml:"plugin_index"`
 	Events      []string `toml:"events"`
 	BufferSize  int      `toml:"buffer_size"`
+	StopTimeout int      `toml:"stop_timeout"`
+
+	HealthCheckInterval time.Duration `toml:"health_check_interval"`
+	ReconnectInterval   time.Duration `toml:"reconnect_interval"`
 }
 
 type NRIDataSource struct {
@@ -141,10 +145,14 @@ func (n *NRIDataSource) Stop() error {
 		close(done)
 	}()
 
+	stopTimeout := n.config.StopTimeout
+	if stopTimeout <= 0 {
+		stopTimeout = 5
+	}
 	select {
 	case <-done:
 		n.logger.Info("NRI data source stopped gracefully")
-	case <-time.After(5 * time.Second):
+	case <-time.After(time.Duration(stopTimeout) * time.Second):
 		n.logger.Warn("NRI data source stop timeout, forcing exit")
 	}
 
@@ -171,6 +179,9 @@ func (n *NRIDataSource) ParseConfig(config map[string]interface{}) error {
 	}
 	if bufferSize, ok := config["buffer_size"].(int); ok {
 		n.config.BufferSize = bufferSize
+	}
+	if v, ok := config["stop_timeout"].(int64); ok {
+		n.config.StopTimeout = int(v)
 	}
 
 	return n.config.Validate()
@@ -450,12 +461,20 @@ func (n *NRIDataSource) createPodEvent(eventType string, pod *api.PodSandbox) *c
 		return nil
 	}
 
+	baseCtx := n.ownCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	traceID := common.GenerateTraceID(baseCtx)
+	ctx := common.ContextWithTraceID(baseCtx, traceID)
 	event := &common.Event{
 		ID:        fmt.Sprintf("pod-%s-%d", pod.Uid, time.Now().UnixNano()),
 		Type:      eventType,
 		Topic:     eventType,
 		Timestamp: time.Now(),
 		Source:    "nri",
+		TraceID:   traceID,
+		Ctx:       ctx,
 		TypedPayload: &nutsapi.Event_Pod{
 			Pod: &nutsapi.PodEventPayload{
 				PodUid:       pod.Uid,
@@ -478,6 +497,11 @@ func (n *NRIDataSource) createContainerEvent(eventType string, pod *api.PodSandb
 		return nil
 	}
 
+	baseCtx := n.ownCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
 	podPayload := &nutsapi.PodEventPayload{
 		Extensions: map[string]string{
 			"container_id":    container.Id,
@@ -494,12 +518,16 @@ func (n *NRIDataSource) createContainerEvent(eventType string, pod *api.PodSandb
 		podPayload.Labels = pod.Labels
 	}
 
+	traceID := common.GenerateTraceID(baseCtx)
+	ctx := common.ContextWithTraceID(baseCtx, traceID)
 	event := &common.Event{
 		ID:        fmt.Sprintf("container-%s-%d", container.Id, time.Now().UnixNano()),
 		Type:      eventType,
 		Topic:     eventType,
 		Timestamp: time.Now(),
 		Source:    "nri",
+		TraceID:   traceID,
+		Ctx:       ctx,
 		TypedPayload: &nutsapi.Event_Pod{
 			Pod: podPayload,
 		},

@@ -2,6 +2,7 @@ package component
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -63,6 +64,7 @@ func (p *WorkerPool) worker(id int) {
 			// 处理事件
 			if err := p.handler(event); err != nil {
 				atomic.AddInt64(&p.failed, 1)
+				fmt.Printf("[WorkerPool] handler error: %v\n", err)
 			} else {
 				atomic.AddInt64(&p.processed, 1)
 			}

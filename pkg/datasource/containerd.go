@@ -148,10 +148,14 @@ func (c *ContainerdDataSource) Stop() error {
 		close(waitCh)
 	}()
 
+	stopTimeout := c.config.StopTimeout
+	if stopTimeout <= 0 {
+		stopTimeout = 5
+	}
 	select {
 	case <-waitCh:
 		c.logger.Info("Containerd data source stopped gracefully")
-	case <-time.After(5 * time.Second):
+	case <-time.After(time.Duration(stopTimeout) * time.Second):
 		c.logger.Warn("Containerd data source stop timeout, forcing exit")
 	}
 
@@ -223,12 +227,31 @@ func (c *ContainerdDataSource) buildFilters() []string {
 	return filters
 }
 
+// newTraceID 生成 TraceID 并返回带 TraceID 的 context
+func (c *ContainerdDataSource) newTraceID() (string, context.Context) {
+	baseCtx := c.ownCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	traceID := common.GenerateTraceID(baseCtx)
+	ctx := common.ContextWithTraceID(baseCtx, traceID)
+	return traceID, ctx
+}
+
 // runEventLoop 运行事件循环，包含重连逻辑
 func (c *ContainerdDataSource) runEventLoop() {
 	c.logger.Info("Containerd event loop started")
 
-	backoff := 1 * time.Second
-	maxBackoff := 30 * time.Second
+	initialBackoff := c.config.ReconnectInitialBackoff
+	if initialBackoff <= 0 {
+		initialBackoff = 1
+	}
+	maxBackoffSec := c.config.ReconnectMaxBackoff
+	if maxBackoffSec <= 0 {
+		maxBackoffSec = 30
+	}
+	backoff := time.Duration(initialBackoff) * time.Second
+	maxBackoff := time.Duration(maxBackoffSec) * time.Second
 
 	for {
 		select {
@@ -377,12 +400,15 @@ func (c *ContainerdDataSource) handleTaskCreate(decoded interface{}) *common.Eve
 		extensions["checkpoint"] = taskCreate.Checkpoint
 	}
 
+	traceID, ctx := c.newTraceID()
 	return &common.Event{
 		ID:        fmt.Sprintf("containerd-task-create-%s-%d", taskCreate.ContainerID, time.Now().UnixNano()),
 		Type:      "TaskCreate",
 		Topic:     "TaskCreate",
 		Timestamp: time.Now(),
 		Source:    "containerd",
+		TraceID:   traceID,
+		Ctx:       ctx,
 		TypedPayload: &nutsapi.Event_Pod{
 			Pod: &nutsapi.PodEventPayload{
 				Extensions: extensions,
@@ -398,12 +424,15 @@ func (c *ContainerdDataSource) handleTaskStart(decoded interface{}) *common.Even
 		return nil
 	}
 
+	traceID, ctx := c.newTraceID()
 	return &common.Event{
 		ID:        fmt.Sprintf("containerd-task-start-%s-%d", taskStart.ContainerID, time.Now().UnixNano()),
 		Type:      "TaskStart",
 		Topic:     "TaskStart",
 		Timestamp: time.Now(),
 		Source:    "containerd",
+		TraceID:   traceID,
+		Ctx:       ctx,
 		TypedPayload: &nutsapi.Event_Pod{
 			Pod: &nutsapi.PodEventPayload{
 				Extensions: map[string]string{
@@ -432,12 +461,15 @@ func (c *ContainerdDataSource) handleTaskExit(decoded interface{}) *common.Event
 		extensions["exited_at"] = taskExit.ExitedAt.AsTime().Format(time.RFC3339Nano)
 	}
 
+	traceID, ctx := c.newTraceID()
 	return &common.Event{
 		ID:        fmt.Sprintf("containerd-task-exit-%s-%d", taskExit.ContainerID, time.Now().UnixNano()),
 		Type:      "TaskExit",
 		Topic:     "TaskExit",
 		Timestamp: time.Now(),
 		Source:    "containerd",
+		TraceID:   traceID,
+		Ctx:       ctx,
 		TypedPayload: &nutsapi.Event_Pod{
 			Pod: &nutsapi.PodEventPayload{
 				Extensions: extensions,
@@ -463,12 +495,15 @@ func (c *ContainerdDataSource) handleTaskDelete(decoded interface{}) *common.Eve
 		extensions["exited_at"] = taskDelete.ExitedAt.AsTime().Format(time.RFC3339Nano)
 	}
 
+	traceID, ctx := c.newTraceID()
 	return &common.Event{
 		ID:        fmt.Sprintf("containerd-task-delete-%s-%d", taskDelete.ContainerID, time.Now().UnixNano()),
 		Type:      "TaskDelete",
 		Topic:     "TaskDelete",
 		Timestamp: time.Now(),
 		Source:    "containerd",
+		TraceID:   traceID,
+		Ctx:       ctx,
 		TypedPayload: &nutsapi.Event_Pod{
 			Pod: &nutsapi.PodEventPayload{
 				Extensions: extensions,
@@ -484,12 +519,15 @@ func (c *ContainerdDataSource) handleTaskPaused(decoded interface{}) *common.Eve
 		return nil
 	}
 
+	traceID, ctx := c.newTraceID()
 	return &common.Event{
 		ID:        fmt.Sprintf("containerd-task-paused-%s-%d", taskPaused.ContainerID, time.Now().UnixNano()),
 		Type:      "TaskPause",
 		Topic:     "TaskPause",
 		Timestamp: time.Now(),
 		Source:    "containerd",
+		TraceID:   traceID,
+		Ctx:       ctx,
 		TypedPayload: &nutsapi.Event_Pod{
 			Pod: &nutsapi.PodEventPayload{
 				Extensions: map[string]string{
@@ -507,12 +545,15 @@ func (c *ContainerdDataSource) handleTaskResumed(decoded interface{}) *common.Ev
 		return nil
 	}
 
+	traceID, ctx := c.newTraceID()
 	return &common.Event{
 		ID:        fmt.Sprintf("containerd-task-resumed-%s-%d", taskResumed.ContainerID, time.Now().UnixNano()),
 		Type:      "TaskResume",
 		Topic:     "TaskResume",
 		Timestamp: time.Now(),
 		Source:    "containerd",
+		TraceID:   traceID,
+		Ctx:       ctx,
 		TypedPayload: &nutsapi.Event_Pod{
 			Pod: &nutsapi.PodEventPayload{
 				Extensions: map[string]string{
@@ -539,12 +580,15 @@ func (c *ContainerdDataSource) handleContainerCreate(decoded interface{}) *commo
 		extensions["runtime_name"] = containerCreate.Runtime.Name
 	}
 
+	traceID, ctx := c.newTraceID()
 	return &common.Event{
 		ID:        fmt.Sprintf("containerd-container-create-%s-%d", containerCreate.ID, time.Now().UnixNano()),
 		Type:      "ContainerCreate",
 		Topic:     "ContainerCreate",
 		Timestamp: time.Now(),
 		Source:    "containerd",
+		TraceID:   traceID,
+		Ctx:       ctx,
 		TypedPayload: &nutsapi.Event_Pod{
 			Pod: &nutsapi.PodEventPayload{
 				Extensions: extensions,
@@ -560,12 +604,15 @@ func (c *ContainerdDataSource) handleContainerDelete(decoded interface{}) *commo
 		return nil
 	}
 
+	traceID, ctx := c.newTraceID()
 	return &common.Event{
 		ID:        fmt.Sprintf("containerd-container-delete-%s-%d", containerDelete.ID, time.Now().UnixNano()),
 		Type:      "ContainerDelete",
 		Topic:     "ContainerDelete",
 		Timestamp: time.Now(),
 		Source:    "containerd",
+		TraceID:   traceID,
+		Ctx:       ctx,
 		TypedPayload: &nutsapi.Event_Pod{
 			Pod: &nutsapi.PodEventPayload{
 				Extensions: map[string]string{

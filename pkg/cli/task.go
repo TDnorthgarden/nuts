@@ -19,7 +19,8 @@ var taskListCmd = &cobra.Command{
 	Short: "列出所有任务",
 	Long:  `列出所有当前的任务及其状态`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return listTasks()
+		traceID, _ := cmd.Flags().GetString("trace-id")
+		return listTasks(traceID)
 	},
 }
 
@@ -50,11 +51,18 @@ func init() {
 	taskCmd.AddCommand(taskListCmd)
 	taskCmd.AddCommand(taskGetCmd)
 	taskCmd.AddCommand(taskHistoryCmd)
+
+	// 添加 --trace-id 标志
+	taskListCmd.Flags().String("trace-id", "", "按 TraceID 过滤任务")
 }
 
 // listTasks 列出任务（HTTP API调用）
-func listTasks() error {
-	resp, err := httpClient.Get("/api/v1/tasks")
+func listTasks(traceID string) error {
+	path := "/api/v1/tasks"
+	if traceID != "" {
+		path += "?trace_id=" + traceID
+	}
+	resp, err := httpClient.Get(path)
 	if err != nil {
 		return fmt.Errorf("连接服务端失败: %w", err)
 	}

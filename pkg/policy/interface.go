@@ -2,6 +2,8 @@ package policy
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/sig-cloudnative/nuts/pkg/common"
 	"github.com/sig-cloudnative/nuts/pkg/config"
@@ -64,11 +66,11 @@ type Policy struct {
 	// DSLEngine 使用的DSL引擎类型
 	DSLEngine string `json:"dsl_engine" yaml:"dsl_engine" validate:"required,oneof=cel libdslgo rego"`
 
-	// Command 动作命令（与具体 action 实现配套使用）
-	Command string `json:"command" yaml:"command,omitempty"`
-
 	// Expansion 策略自定义内容（不做策略匹配使用，仅用于事件传递）
 	Expansion map[string]interface{} `json:"expansion" yaml:"expansion,omitempty"`
+
+	// Timeout 超时时长，Go duration 格式（"5m", "30s", "1h"），空串使用配置默认值
+	Timeout string `json:"timeout" yaml:"timeout,omitempty"`
 
 	// Version 乐观锁版本号
 	Version int64 `json:"version" yaml:"version,omitempty"`
@@ -83,6 +85,13 @@ func (p *Policy) Validate() error {
 	// 自定义验证逻辑
 	if p.DSLEngine == "" {
 		p.DSLEngine = "cel" // 默认使用 CEL
+	}
+
+	// 验证 timeout 格式：空串或合法 duration
+	if p.Timeout != "" {
+		if _, err := time.ParseDuration(p.Timeout); err != nil {
+			return fmt.Errorf("invalid timeout %q: %w", p.Timeout, err)
+		}
 	}
 
 	return nil
@@ -102,11 +111,11 @@ type PolicyMatch struct {
 	// Error 评估错误（如果有）
 	Error error
 
-	// Command 动作命令（从匹配的策略中复制，与具体 action 实现配套使用）
-	Command string
-
 	// Expansion 策略自定义内容（从匹配的策略中复制）
 	Expansion map[string]interface{}
+
+	// Timeout 超时时长，从匹配的 Policy 复制
+	Timeout string
 }
 
 // PolicyStore 策略存储接口

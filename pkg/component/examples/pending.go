@@ -1,6 +1,7 @@
 package examples
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/sig-cloudnative/nuts/pkg/common"
@@ -46,5 +47,9 @@ func (c *PendingComponent) handleEvent(event *common.Event) error {
 	fmt.Printf("[PendingComponent] Processing task %s\n", taskID)
 
 	// 自动转换到 validating 状态
-	return c.PublishStateTransition(taskID, "pending", "validating", true, "auto transition to validating")
+	ctx := event.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return c.PublishStateTransition(ctx, taskID, "pending", "validating", true, "auto transition to validating")
 }

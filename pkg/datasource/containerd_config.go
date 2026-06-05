@@ -2,6 +2,7 @@ package datasource
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -21,6 +22,21 @@ type ContainerdConfig struct {
 
 	// BufferSize 事件缓冲区大小
 	BufferSize int `toml:"buffer_size"`
+
+	// StopTimeout Stop 等待超时（秒），默认 5
+	StopTimeout int `toml:"stop_timeout"`
+
+	// ReconnectInitialBackoff 重连初始退避（秒），默认 1
+	ReconnectInitialBackoff int `toml:"reconnect_initial_backoff"`
+
+	// ReconnectMaxBackoff 重连最大退避（秒），默认 30
+	ReconnectMaxBackoff int `toml:"reconnect_max_backoff"`
+
+	// HealthCheckInterval 健康检查间隔
+	HealthCheckInterval time.Duration `toml:"health_check_interval"`
+
+	// ReconnectInterval 重连间隔
+	ReconnectInterval time.Duration `toml:"reconnect_interval"`
 }
 
 // ParseContainerdConfig 解析 containerd 配置
@@ -67,6 +83,15 @@ func ParseContainerdConfig(config interface{}) (DataSourceConfig, error) {
 				}
 			}
 		}
+		if v, ok := configMap["stop_timeout"].(int64); ok {
+			cfg.StopTimeout = int(v)
+		}
+		if v, ok := configMap["reconnect_initial_backoff"].(int64); ok {
+			cfg.ReconnectInitialBackoff = int(v)
+		}
+		if v, ok := configMap["reconnect_max_backoff"].(int64); ok {
+			cfg.ReconnectMaxBackoff = int(v)
+		}
 	}
 
 	return cfg, nil
@@ -95,6 +120,12 @@ func (c *ContainerdConfig) Validate() error {
 	}
 	if c.BufferSize <= 0 {
 		c.BufferSize = 1000 // 设置默认值
+	}
+	if c.HealthCheckInterval == 0 {
+		c.HealthCheckInterval = 30 * time.Second
+	}
+	if c.ReconnectInterval == 0 {
+		c.ReconnectInterval = 5 * time.Second
 	}
 	return nil
 }

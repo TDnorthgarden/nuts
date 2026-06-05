@@ -6,6 +6,7 @@
     "enabled": true,
     "id": "rule-1",
     "version": 1,
+    "timeout": "1s",
     "expansion": {
       "retry_count": 3,
       "severity": "high",

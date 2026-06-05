@@ -130,12 +130,18 @@ func (s *MemoryPolicyStore) Count() (int, error) {
 
 // copyPolicy 复制策略
 func (s *MemoryPolicyStore) copyPolicy(policy *Policy) *Policy {
+	expCopy := make(map[string]interface{}, len(policy.Expansion))
+	for k, v := range policy.Expansion {
+		expCopy[k] = v
+	}
 	return &Policy{
 		ID:          policy.ID,
 		Description: policy.Description,
 		Enabled:     policy.Enabled,
 		DSL:         policy.DSL,
 		DSLEngine:   policy.DSLEngine,
+		Expansion:   expCopy,
+		Timeout:     policy.Timeout,
 		Version:     policy.Version,
 	}
 }

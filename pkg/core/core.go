@@ -21,11 +21,13 @@ import (
 	"github.com/sig-cloudnative/nuts/pkg/datasource"
 	"github.com/sig-cloudnative/nuts/pkg/db"
 	"github.com/sig-cloudnative/nuts/pkg/eventbus"
+	"github.com/sig-cloudnative/nuts/pkg/eventlog"
 	"github.com/sig-cloudnative/nuts/pkg/log"
 	"github.com/sig-cloudnative/nuts/pkg/metrics"
 	"github.com/sig-cloudnative/nuts/pkg/policy"
 	"github.com/sig-cloudnative/nuts/pkg/task"
 	"github.com/sig-cloudnative/nuts/pkg/trace"
+	"go.opentelemetry.io/otel/attribute"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -76,6 +78,9 @@ type Core struct {
 	// policy.matched 直接 channel（替代 EventBus 订阅）
 	policyMatchedCh chan *common.Event
 
+	// 最大并发任务信号量
+	taskSem chan struct{}
+
 	// 度量收集
 	Metrics          common.MetricsRecorder
 	prometheusEnabled bool
@@ -83,6 +88,9 @@ type Core struct {
 	// 分布式追踪
 	tracerProvider interface{ Shutdown(context.Context) error }
 	tracer         oteltrace.Tracer
+
+	// 事件日志
+	eventLog eventlog.EventLog
 
 	// 双启动/双停止防护
 	started atomic.Bool
@@ -167,6 +175,9 @@ func New(cfg *Config) (*Core, error) {
 	}
 	core.policyMatchedCh = make(chan *common.Event, channelSize)
 
+	// 初始化 ID 生成器（根据 [id] 配置选择 UUID 或 Snowflake）
+	core.initIDGenerator()
+
 	// 根据配置重新配置日志
 	if err := core.reconfigureLogger(); err != nil {
 		return nil, fmt.Errorf("reconfigure logger: %w", err)
@@ -188,7 +199,10 @@ func New(cfg *Config) (*Core, error) {
 		return nil, fmt.Errorf("init datasources: %w", err)
 	}
 
-	// 5. 初始化任务调度
+	// 5. 初始化事件日志
+	core.initEventLog()
+
+	// 6. 初始化任务调度
 	if err := core.initTaskScheduler(); err != nil {
 		return nil, fmt.Errorf("init task scheduler: %w", err)
 	}
@@ -268,6 +282,24 @@ func (c *Core) reconfigureLogger() error {
 	return nil
 }
 
+// initIDGenerator 初始化ID生成器（根据 [id] 配置选择 UUID 或 Snowflake）
+func (c *Core) initIDGenerator() {
+	idCfg := c.Config.GetMap("id")
+	generator, err := common.IDGeneratorFactory.Create(idCfg)
+	if err != nil {
+		c.Logger.Warn("ID generator init failed, using default UUID",
+			log.String("error", err.Error()),
+		)
+		return
+	}
+	common.SetDefaultGenerator(generator)
+	idType, _ := idCfg["type"].(string)
+	if idType == "" {
+		idType = "uuid"
+	}
+	c.Logger.Info("ID generator initialized", log.String("type", idType))
+}
+
 // initMetrics 初始化指标收集
 func (c *Core) initMetrics() {
 	metricsType := c.Config.GetString("metrics.type")
@@ -287,6 +319,22 @@ func (c *Core) initMetrics() {
 	// 包裹告警装饰器
 	if c.Config.GetBool("metrics.alert.enabled") {
 		alertCfg := metrics.DefaultAlertConfig()
+		if v := c.Config.Get("metrics.alert.timeout_rate_threshold"); v != nil {
+			if f, ok := v.(float64); ok && f > 0 {
+				alertCfg.TimeoutRateThreshold = f
+			}
+		}
+		if v := c.Config.Get("metrics.alert.error_rate_threshold"); v != nil {
+			if f, ok := v.(float64); ok && f > 0 {
+				alertCfg.ErrorRateThreshold = f
+			}
+		}
+		if v := c.Config.GetInt("metrics.alert.window_size_seconds"); v > 0 {
+			alertCfg.WindowSize = time.Duration(v) * time.Second
+		}
+		if v := c.Config.GetInt("metrics.alert.check_interval_seconds"); v > 0 {
+			alertCfg.CheckInterval = time.Duration(v) * time.Second
+		}
 		c.Metrics = metrics.NewAlertMetrics(c.Metrics, c.Logger, alertCfg)
 		c.Logger.Info("Metrics alerting enabled")
 	}
@@ -308,11 +356,18 @@ func (c *Core) initTracer() {
 		serviceName = "nuts"
 	}
 
+	sampleRate := 1.0
+	if v := c.Config.Get("tracing.sample_rate"); v != nil {
+		if f, ok := v.(float64); ok {
+			sampleRate = f
+		}
+	}
+
 	tp, err := trace.InitTracer(c.ctx, trace.Config{
 		Enabled:     true,
 		Endpoint:    endpoint,
 		ServiceName: serviceName,
-		SampleRate:  1.0,
+		SampleRate:  sampleRate,
 	})
 	if err != nil {
 		c.Logger.Error("Failed to init tracer", log.Error(err))
@@ -384,6 +439,59 @@ func (c *Core) initEventBus() error {
 	return nil
 }
 
+// initEventLog 初始化事件日志
+func (c *Core) initEventLog() {
+	logType := c.Config.GetString("eventlog.type")
+	if logType == "" || logType == "disabled" {
+		c.Logger.Info("EventLog disabled")
+		return
+	}
+
+	switch logType {
+	case "memory":
+		size := c.Config.GetInt("eventlog.buffer_size")
+		if size <= 0 {
+			size = 10000
+		}
+		c.eventLog = eventlog.NewAsyncEventLog(eventlog.NewRingBufferEventLog(size), 4096)
+		c.Logger.Info("EventLog initialized (memory)", log.Int("buffer_size", size))
+	case "db":
+		dbType := c.Config.GetString("eventlog.db.type")
+		if dbType == "" {
+			dbType = "sqlite"
+		}
+		dbPath := c.Config.GetString("eventlog.db.path")
+		if dbPath == "" {
+			dbPath = "data/eventlog.db"
+		}
+		database, err := db.DefaultFactory.Create(db.Config{Type: dbType, Path: dbPath})
+		if err != nil {
+			c.Logger.Warn("Failed to create EventLog DB, falling back to memory", log.Error(err))
+			c.eventLog = eventlog.NewAsyncEventLog(eventlog.NewRingBufferEventLog(10000), 4096)
+			return
+		}
+		c.eventLog = eventlog.NewAsyncEventLog(eventlog.NewDBEventLog(database), 4096)
+		c.Logger.Info("EventLog initialized (db)", log.String("path", dbPath))
+	default:
+		c.Logger.Warn("Unknown eventlog type, disabling", log.String("type", logType))
+	}
+
+	// 启动清理器
+	retentionHours := c.Config.GetInt("eventlog.retention_hours")
+	if retentionHours > 0 {
+		cleanupInterval := c.Config.GetString("eventlog.cleanup_interval")
+		interval, err := time.ParseDuration(cleanupInterval)
+		if err != nil {
+			interval = time.Hour
+		}
+		cleaner := eventlog.NewCleaner(c.eventLog, interval, time.Duration(retentionHours)*time.Hour)
+		cleaner.Start()
+		c.Logger.Info("EventLog cleaner started",
+			log.Int("retention_hours", retentionHours),
+			log.String("interval", interval.String()))
+	}
+}
+
 // initTaskScheduler 初始化任务调度器（单存储模式）
 func (c *Core) initTaskScheduler() error {
 	// 加载状态机配置
@@ -417,6 +525,11 @@ func (c *Core) initTaskScheduler() error {
 	// 状态机引擎使用单一存储
 	c.stateMachineEngine = task.NewDefaultStateMachineEngine(c.taskStore, smConfig, c.EventBus)
 	c.stateMachineEngine.SetMetrics(c.Metrics)
+	if c.eventLog != nil {
+		if sme, ok := c.stateMachineEngine.(interface{ SetEventLog(eventlog.EventLog) }); ok {
+			sme.SetEventLog(c.eventLog)
+		}
+	}
 
 	// 归档自动清理（基于 ArchivedAt）
 	c.archiveCleaner, err = c.initArchiveCleaner()
@@ -431,10 +544,37 @@ func (c *Core) initTaskScheduler() error {
 			timeoutCheckInterval = d
 		}
 	}
-	c.timeoutChecker = task.NewTimeoutChecker(c.taskStore, smConfig, timeoutCheckInterval, 5)
+	rebuildInterval := c.Config.GetInt("task.scheduler.timeout_rebuild_interval")
+	if rebuildInterval <= 0 {
+		rebuildInterval = 5
+	}
+	c.timeoutChecker = task.NewTimeoutChecker(c.taskStore, timeoutCheckInterval, rebuildInterval)
 
 	// 恢复孤儿任务：扫描终态但 ArchivedAt 未设置的任务（异常重启导致）
 	c.recoverOrphanedTasks()
+
+	// 创建并发任务信号量
+	maxConcurrent := c.Config.GetInt("task.max_concurrent")
+	if maxConcurrent <= 0 {
+		maxConcurrent = 100
+	}
+	c.taskSem = make(chan struct{}, maxConcurrent)
+	c.Logger.Info("Task concurrency limit", log.Int("max_concurrent", maxConcurrent))
+
+	// 占满信号量以反映已有活跃任务
+	// 仅统计非终态任务，避免已归档/终态任务占位
+	activeTasks, err := c.taskStore.Count(task.TaskFilter{IncludeArchived: false})
+	if err == nil {
+		limit := maxConcurrent
+		if activeTasks < limit {
+			limit = activeTasks
+		}
+		for i := 0; i < limit; i++ {
+			c.taskSem <- struct{}{}
+		}
+		c.Logger.Info("Active tasks restored to concurrency semaphore",
+			log.Int("count", limit))
+	}
 
 	return nil
 }
@@ -493,7 +633,11 @@ func (c *Core) initArchiveCleaner() (*task.ArchiveCleaner, error) {
 // initDataSources 初始化数据源管理器
 func (c *Core) initDataSources() error {
 	// 创建事件channel
-	eventCh := make(chan *common.Event, 1000)
+	bufferSize := c.Config.GetInt("datasource.event_channel_buffer_size")
+	if bufferSize <= 0 {
+		bufferSize = 1000
+	}
+	eventCh := make(chan *common.Event, bufferSize)
 
 	// 创建数据源管理器
 	c.DataSourceManager = datasource.NewDataSourceManager(eventCh)
@@ -561,6 +705,19 @@ func (c *Core) processEvents(eventCh <-chan *common.Event) {
 				continue
 			}
 
+			// EventLog: 数据源事件采集
+			if c.eventLog != nil {
+				c.eventLog.Append(c.ctx, &eventlog.EventLogEntry{
+					ID:        common.GenerateUUID(),
+					TraceID:   event.TraceID,
+					EventID:   event.ID,
+					Stage:     eventlog.StageDataSource,
+					EventType: event.Type,
+					Source:    event.Source,
+					Timestamp: event.Timestamp,
+				})
+			}
+
 			// 速率限制
 			if err := c.eventLimiter.Wait(c.ctx); err != nil {
 				continue
@@ -570,7 +727,14 @@ func (c *Core) processEvents(eventCh <-chan *common.Event) {
 			ctx := c.ctx
 			var span oteltrace.Span
 			if c.tracer != nil {
-				ctx, span = c.tracer.Start(ctx, "event.process")
+				ctx, span = c.tracer.Start(ctx, "event.process",
+					oteltrace.WithAttributes(
+						attribute.String("event.id", event.ID),
+						attribute.String("event.type", event.Type),
+						attribute.String("event.source", event.Source),
+						attribute.String("event.trace_id", event.TraceID),
+					),
+				)
 			}
 
 			// 策略匹配
@@ -588,6 +752,19 @@ func (c *Core) processEvents(eventCh <-chan *common.Event) {
 				if !match.Matched {
 					continue
 				}
+				// EventLog: 策略匹配结果
+				if c.eventLog != nil {
+					c.eventLog.Append(c.ctx, &eventlog.EventLogEntry{
+						ID:        common.GenerateUUID(),
+						TraceID:   event.TraceID,
+						EventID:   event.ID,
+						Stage:     eventlog.StagePolicyMatch,
+						EventType: "PolicyMatched",
+						Source:    "policy-engine",
+						Timestamp: time.Now(),
+						Payload:   map[string]interface{}{"policy_id": match.PolicyID},
+					})
+				}
 				c.processMatchedEvent(match, event)
 			}
 
@@ -600,11 +777,28 @@ func (c *Core) processEvents(eventCh <-chan *common.Event) {
 
 // processMatchedEvent 处理策略匹配成功的事件
 func (c *Core) processMatchedEvent(match *policy.PolicyMatch, sourceEvent *common.Event) {
+	// 继承源事件的 ctx（含 TraceID），保持链路追踪连续性
+	sourceCtx := c.ctx
+	if sourceEvent != nil && sourceEvent.Ctx != nil {
+		sourceCtx = sourceEvent.Ctx
+	}
+
+	// 创建 child span
+	if c.tracer != nil {
+		var span oteltrace.Span
+		sourceCtx, span = c.tracer.Start(sourceCtx, "policy.matched",
+			oteltrace.WithAttributes(
+				attribute.String("policy.id", match.PolicyID),
+			),
+		)
+		defer span.End()
+	}
+
 	matchedEvent := common.NewEvent(
 		"PolicyMatched",
 		"policy.matched",
 		"policy-engine",
-	).WithContext(c.ctx)
+	).WithContext(sourceCtx)
 
 	triggerEventType := ""
 	triggerEventID := ""
@@ -622,6 +816,7 @@ func (c *Core) processMatchedEvent(match *policy.PolicyMatch, sourceEvent *commo
 		matchedEvent.Payload["trigger_event_type"] = triggerEventType
 		matchedEvent.Payload["trigger_event_id"] = triggerEventID
 	}
+	matchedEvent.Payload["policy_timeout"] = match.Timeout
 
 	extensions := make(map[string]string)
 	for k, v := range match.Expansion {
@@ -735,6 +930,45 @@ func (c *Core) handleTransitionCommand(event *common.Event) {
 		return
 	}
 
+	// 创建 child span
+	ctx := c.ctx
+	if c.tracer != nil {
+		var span oteltrace.Span
+		ctx, span = c.tracer.Start(event.Ctx, "transition.command",
+			oteltrace.WithAttributes(
+				attribute.String("task.id", taskID),
+				attribute.String("transition.from", currentState),
+				attribute.String("transition.to", targetState),
+			),
+		)
+		defer span.End()
+	}
+
+	c.Logger.Info("Received transition command",
+		log.String("task_id", taskID),
+		log.String("from", currentState),
+		log.String("to", targetState),
+		log.String("component", componentName),
+		log.Any("success", success))
+
+	// EventLog: 状态转换命令接收
+	if c.eventLog != nil {
+		c.eventLog.Append(c.ctx, &eventlog.EventLogEntry{
+			ID:            common.GenerateUUID(),
+			TraceID:       event.TraceID,
+			Stage:         eventlog.StageCommand,
+			EventType:     "StateTransitionCommand",
+			Source:        componentName,
+			Timestamp:     time.Now(),
+			TaskID:        taskID,
+			OldState:      currentState,
+			NewState:      targetState,
+			ComponentName: componentName,
+			Success:       &success,
+			Message:       message,
+		})
+	}
+
 	cmd := task.TransitionCommand{
 		TaskID:       taskID,
 		CurrentState: task.TaskState(currentState),
@@ -748,17 +982,42 @@ func (c *Core) handleTransitionCommand(event *common.Event) {
 		},
 	}
 
-	if err := c.stateMachineEngine.HandleTransitionCommand(c.ctx, cmd); err != nil {
+	if err := c.stateMachineEngine.HandleTransitionCommand(ctx, cmd); err != nil {
 		c.Logger.Error("Failed to handle transition command",
 			log.String("task_id", taskID),
 			log.String("from", currentState),
 			log.String("to", targetState),
 			log.Error(err))
+		return
+	}
+
+	// 转换到终态时释放并发槽位
+	smCfg := c.stateMachineEngine.GetStateMachineConfig()
+	if smCfg.IsTerminalState(targetState) {
+		select {
+		case <-c.taskSem:
+		default:
+		}
 	}
 }
 
 // handlePolicyMatchedEvent 处理 PolicyMatchedEvent，创建任务并启动状态机
 func (c *Core) handlePolicyMatchedEvent(event *common.Event) {
+	// 获取并发槽位（达到上限时阻塞，天然反压至数据源）
+	select {
+	case c.taskSem <- struct{}{}:
+	case <-c.ctx.Done():
+		return
+	}
+
+	// 创建 child span
+	ctx := c.ctx
+	if c.tracer != nil {
+		var span oteltrace.Span
+		ctx, span = c.tracer.Start(event.Ctx, "task.create")
+		defer span.End()
+	}
+
 	// 解析事件
 	policyID := event.GetPayloadString("policy_id")
 	triggerEventType := event.GetPayloadString("trigger_event_type")
@@ -772,6 +1031,14 @@ func (c *Core) handlePolicyMatchedEvent(event *common.Event) {
 		"policy_id":          policyID,
 		"trigger_event_type": triggerEventType,
 		"trigger_event_id":   triggerEventID,
+	}
+	// 持久化 rule timeout，handleTaskRetry 时用于重新计算生效超时
+	if timeout := event.GetPayloadString("policy_timeout"); timeout != "" {
+		metadata["policy_timeout"] = timeout
+	}
+	// 传递 TraceID，CreateTask 时写入 Task.TraceID
+	if event.TraceID != "" {
+		metadata["trace_id"] = event.TraceID
 	}
 	// 将策略的 Expansion 内容存储到任务的 metadata 中（转换为字符串）
 	if tp, ok := event.TypedPayload.(*api.Event_Policy); ok && tp.Policy != nil {
@@ -790,10 +1057,39 @@ func (c *Core) handlePolicyMatchedEvent(event *common.Event) {
 		Event:       event,
 	}
 
-	t, err := c.stateMachineEngine.CreateTask(c.ctx, spec)
+	t, err := c.stateMachineEngine.CreateTask(ctx, spec)
 	if err != nil {
 		c.Logger.Error("Failed to create task via state machine engine", log.Error(err))
+		<-c.taskSem
 		return
+	}
+
+	// EventLog: 任务创建
+	if c.eventLog != nil {
+		c.eventLog.Append(c.ctx, &eventlog.EventLogEntry{
+			ID:        common.GenerateUUID(),
+			TraceID:   event.TraceID,
+			Stage:     eventlog.StageTaskCreate,
+			EventType: "TaskCreated",
+			Source:    "statemachine-engine",
+			Timestamp: time.Now(),
+			TaskID:    t.ID,
+			NewState:  string(t.State),
+		})
+	}
+
+	// 计算有效超时并设 TimeoutAt
+	effective := computeEffectiveTimeout(
+		event.GetPayloadString("policy_timeout"),
+		c.Config.GetString("task.default_timeout"),
+	)
+
+	t.TimeoutAt = new(time.Time)
+	*t.TimeoutAt = time.Now().Add(effective)
+	if err := c.taskStore.Update(t); err != nil {
+		c.Logger.Error("Failed to set task timeout", log.String("task_id", t.ID), log.Error(err))
+	} else {
+		c.timeoutChecker.Push(t.ID, *t.TimeoutAt)
 	}
 
 	// 发布任务状态变更事件 (使用配置中的初始状态)
@@ -822,6 +1118,21 @@ func (c *Core) handlePolicyMatchedEvent(event *common.Event) {
 			Extensions:       extensions,
 		},
 	}
+	// EventLog: 任务状态变更（创建时）
+	if c.eventLog != nil {
+		c.eventLog.Append(c.ctx, &eventlog.EventLogEntry{
+			ID:        common.GenerateUUID(),
+			TraceID:   event.TraceID,
+			Stage:     eventlog.StageTaskState,
+			EventType: "TaskStateChanged",
+			Topic:     topic,
+			Source:    "statemachine-engine",
+			Timestamp: time.Now(),
+			TaskID:    t.ID,
+			NewState:  string(t.State),
+		})
+	}
+
 	if err := c.EventBus.Publish(topic, stateEvent); err != nil {
 		c.Logger.Error("Failed to publish task state changed", log.Error(err))
 	}
@@ -860,6 +1171,21 @@ func (c *Core) handleTimeoutEvent(ctx context.Context, taskID string, currentSta
 		return
 	}
 
+	// EventLog: 超时处理
+	if c.eventLog != nil {
+		c.eventLog.Append(c.ctx, &eventlog.EventLogEntry{
+			ID:        common.GenerateUUID(),
+			TraceID:   tsk.TraceID,
+			Stage:     eventlog.StageTimeout,
+			EventType: "TaskTimeout",
+			Source:    "timeout-handler",
+			Timestamp: time.Now(),
+			TaskID:    taskID,
+			OldState:  string(currentState),
+			Message:   fmt.Sprintf("timeout, auto_retry=%v", stateCfg.AutoRetry),
+		})
+	}
+
 	if stateCfg.AutoRetry && tsk.RetryCount < stateCfg.MaxRetries {
 		c.handleTaskRetry(ctx, tsk, cfg, stateCfg)
 	} else {
@@ -867,11 +1193,30 @@ func (c *Core) handleTimeoutEvent(ctx context.Context, taskID string, currentSta
 	}
 }
 
-// backoff 计算指数退避延迟：1s, 2s, 4s, 8s, ... 最大 60s
-func backoff(retryCount int) time.Duration {
+// computeEffectiveTimeout 计算生效超时
+// ruleTimeoutStr: rule timeout（Go duration 格式），空串/无效视为未设置
+// defaultTimeoutStr: 配置兜底（Go duration 格式），空串/无效用 30 分钟
+func computeEffectiveTimeout(ruleTimeoutStr, defaultTimeoutStr string) time.Duration {
+	defaultTimeout, _ := time.ParseDuration(defaultTimeoutStr)
+	if defaultTimeout <= 0 {
+		defaultTimeout = 30 * time.Minute
+	}
+	ruleTimeout, err := time.ParseDuration(ruleTimeoutStr)
+	if err == nil && ruleTimeout > 0 && ruleTimeout < defaultTimeout {
+		return ruleTimeout
+	}
+	return defaultTimeout
+}
+
+// backoff 计算指数退避延迟：1s, 2s, 4s, 8s, ... 最大 maxBackoffSeconds 秒
+func (c *Core) backoff(retryCount int) time.Duration {
+	maxBackoff := c.Config.GetInt("task.retry.max_backoff_seconds")
+	if maxBackoff <= 0 {
+		maxBackoff = 60
+	}
 	n := 1 << uint(retryCount)
-	if n > 60 {
-		n = 60
+	if n > maxBackoff {
+		n = maxBackoff
 	}
 	return time.Duration(n) * time.Second
 }
@@ -879,11 +1224,11 @@ func backoff(retryCount int) time.Duration {
 // handleTaskRetry 处理超时重试（含指数退避）
 func (c *Core) handleTaskRetry(ctx context.Context, tsk *task.Task, cfg *task.StateMachineConfig, stateCfg task.StateConfig) {
 	// 指数退避：如果还没到退避时间，跳过此 tick
-	if tsk.StateUpdatedAt.Add(backoff(tsk.RetryCount)).After(time.Now()) {
+	if tsk.StateUpdatedAt.Add(c.backoff(tsk.RetryCount)).After(time.Now()) {
 		c.Logger.Info("Task retry backoff not yet elapsed, skipping",
 			log.String("task_id", tsk.ID),
 			log.Int("retry_count", tsk.RetryCount),
-			log.String("backoff", backoff(tsk.RetryCount).String()))
+			log.String("backoff", c.backoff(tsk.RetryCount).String()))
 		return
 	}
 
@@ -896,7 +1241,16 @@ func (c *Core) handleTaskRetry(ctx context.Context, tsk *task.Task, cfg *task.St
 	// 新重试次数（原子化写入，与状态转换一起提交）
 	newRetryCount := tsk.RetryCount + 1
 
-	// 转换到重试状态
+	// 计算新生效超时
+	effective := computeEffectiveTimeout(tsk.Metadata["policy_timeout"],
+		c.Config.GetString("task.default_timeout"))
+	var newTimeout *time.Time
+	if effective > 0 {
+		newTimeout = new(time.Time)
+		*newTimeout = time.Now().Add(effective)
+	}
+
+	// 转换到重试状态（原子化更新 TimeoutAt）
 	cmd := task.TransitionCommand{
 		TaskID:       tsk.ID,
 		CurrentState: tsk.State,
@@ -909,6 +1263,7 @@ func (c *Core) handleTaskRetry(ctx context.Context, tsk *task.Task, cfg *task.St
 			Message: fmt.Sprintf("retry #%d after timeout", newRetryCount),
 		},
 		SetRetryCount: &newRetryCount,
+		SetTimeoutAt:  newTimeout,
 	}
 
 	if err := c.stateMachineEngine.HandleTransitionCommand(ctx, cmd); err != nil {
@@ -916,6 +1271,11 @@ func (c *Core) handleTaskRetry(ctx context.Context, tsk *task.Task, cfg *task.St
 			log.String("task_id", tsk.ID),
 			log.String("target", targetState),
 			log.Error(err))
+		return
+	}
+
+	if newTimeout != nil {
+		c.timeoutChecker.Push(tsk.ID, *newTimeout)
 	}
 }
 
@@ -955,6 +1315,11 @@ func (c *Core) handleTaskArchive(ctx context.Context, tsk *task.Task, cfg *task.
 		}
 		if err := c.taskStore.UpdateResult(tsk.ID, result); err != nil {
 			c.Logger.Error("Failed to update task result on timeout", log.String("task_id", tsk.ID), log.Error(err))
+		}
+		// 释放并发槽位
+		select {
+		case <-c.taskSem:
+		default:
 		}
 	}
 
@@ -1120,7 +1485,11 @@ func (c *Core) Stop() error {
 	// 停止 Tracer（刷新缓冲区）
 	if c.tracerProvider != nil {
 		c.Logger.Info("Stopping tracer")
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		tracerTimeout := c.Config.GetInt("shutdown.tracer_timeout")
+		if tracerTimeout <= 0 {
+			tracerTimeout = 5
+		}
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(tracerTimeout)*time.Second)
 		if err := c.tracerProvider.Shutdown(shutdownCtx); err != nil {
 			c.Logger.Error("Tracer shutdown error", log.Error(err))
 		}
@@ -1131,7 +1500,11 @@ func (c *Core) Stop() error {
 	// 停止HTTP服务器（让 HTTP goroutine 先退出，避免阻塞 wg.Wait）
 	if c.HTTPServer != nil {
 		c.Logger.Info("Stopping HTTP server")
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		httpTimeout := c.Config.GetInt("shutdown.http_timeout")
+		if httpTimeout <= 0 {
+			httpTimeout = 5
+		}
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(httpTimeout)*time.Second)
 		if err := c.HTTPServer.Shutdown(shutdownCtx); err != nil {
 			c.Logger.Error("Failed to shutdown HTTP server", log.Error(err))
 		}
@@ -1183,6 +1556,15 @@ func (c *Core) Stop() error {
 		c.Logger.Info("Stopping archive cleaner")
 		c.archiveCleaner.Stop()
 		c.Logger.Info("Archive cleaner stopped")
+	}
+
+	// 停止事件日志
+	if c.eventLog != nil {
+		c.Logger.Info("Stopping EventLog")
+		if err := c.eventLog.Close(); err != nil {
+			c.Logger.Error("EventLog close error", log.Error(err))
+		}
+		c.Logger.Info("EventLog stopped")
 	}
 
 	c.Logger.Info("Core stopped")
@@ -1277,13 +1659,18 @@ func (c *Core) startHTTPServer() error {
 	// 任务API
 	mux.HandleFunc("/api/v1/tasks", c.handleTasks)
 	mux.HandleFunc("/api/v1/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		// 检查是否是 /api/v1/tasks/:id/history
-		if strings.HasPrefix(r.URL.Path[len("/api/v1/tasks/"):], "history") {
+		path := r.URL.Path[len("/api/v1/tasks/"):]
+		if strings.Contains(path, "/history") {
 			c.handleTaskHistory(w, r)
+		} else if strings.Contains(path, "/events") {
+			c.handleTaskEvents(w, r)
 		} else {
 			c.handleTaskDetail(w, r)
 		}
 	})
+
+	// 追踪API
+	mux.HandleFunc("/api/v1/traces/", c.handleTraces)
 
 	// 状态机API
 	mux.HandleFunc("/api/v1/statemachine/config", c.handleStateMachineConfig)
@@ -1353,9 +1740,21 @@ func (c *Core) handleTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	includeCompleted := r.URL.Query().Get("include_completed") == "true"
+	traceID := r.URL.Query().Get("trace_id")
 
 	filter := task.TaskFilter{IncludeArchived: includeCompleted}
 	tasks, err := c.taskStore.List(filter)
+
+	// 按 trace_id 过滤
+	if traceID != "" && err == nil {
+		filtered := make([]*task.Task, 0)
+		for _, t := range tasks {
+			if t.TraceID == traceID {
+				filtered = append(filtered, t)
+			}
+		}
+		tasks = filtered
+	}
 	if err != nil {
 		resp := common.ErrorWithCode(common.CodeInternalError, err.Error())
 		w.WriteHeader(common.ErrorCodeToHTTPStatus(common.CodeInternalError))
@@ -1422,6 +1821,72 @@ func (c *Core) handleTaskHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := common.Success(history)
+	c.writeJSON(w, resp)
+}
+
+// handleTaskEvents 处理任务事件日志请求
+func (c *Core) handleTaskEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if c.eventLog == nil {
+		resp := common.ErrorWithCode(common.CodeServiceUnavailable, "eventlog not enabled")
+		w.WriteHeader(common.ErrorCodeToHTTPStatus(common.CodeServiceUnavailable))
+		c.writeJSON(w, resp)
+		return
+	}
+
+	// 解析路径: /api/v1/tasks/:id/events
+	path := r.URL.Path[len("/api/v1/tasks/"):]
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 || parts[1] != "events" {
+		resp := common.Error(400, "invalid path")
+		c.writeJSON(w, resp)
+		return
+	}
+	taskID := parts[0]
+
+	entries, err := c.eventLog.QueryByTaskID(taskID)
+	if err != nil {
+		resp := common.Error(500, fmt.Sprintf("query eventlog: %v", err))
+		c.writeJSON(w, resp)
+		return
+	}
+
+	resp := common.Success(map[string]interface{}{
+		"task_id": taskID,
+		"events":  entries,
+		"count":   len(entries),
+	})
+	c.writeJSON(w, resp)
+}
+
+// handleTraces 处理追踪查询请求
+func (c *Core) handleTraces(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if c.eventLog == nil {
+		resp := common.ErrorWithCode(common.CodeServiceUnavailable, "eventlog not enabled")
+		w.WriteHeader(common.ErrorCodeToHTTPStatus(common.CodeServiceUnavailable))
+		c.writeJSON(w, resp)
+		return
+	}
+
+	// 解析路径: /api/v1/traces/:trace_id
+	traceID := r.URL.Path[len("/api/v1/traces/"):]
+	if traceID == "" {
+		resp := common.Error(400, "trace_id is required")
+		c.writeJSON(w, resp)
+		return
+	}
+
+	timeline, err := c.eventLog.QueryByTraceID(traceID)
+	if err != nil {
+		resp := common.Error(500, fmt.Sprintf("query trace: %v", err))
+		c.writeJSON(w, resp)
+		return
+	}
+
+	resp := common.Success(timeline)
 	c.writeJSON(w, resp)
 }
 

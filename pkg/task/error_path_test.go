@@ -79,7 +79,7 @@ func TestUpdateStateWithRecord_TaskNotFound(t *testing.T) {
 
 func TestTransitionState_TaskNotFound(t *testing.T) {
 	store := NewTaskStore(db.NewMemoryDB(), 100)
-	_, err := store.TransitionState("nonexistent", TaskStateProcessing, "test", "reason", nil, false, nil, nil)
+	_, err := store.TransitionState("nonexistent", TaskStateProcessing, "test", "reason", nil, false, false, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for non-existent task")
 	}
@@ -122,7 +122,7 @@ func TestTransitionState_PostCommitFailure(t *testing.T) {
 	}
 
 	// postCommit 失败不应影响状态转换
-	result, err := store.TransitionState("pc-fail", TaskStateProcessing, "test", "reason", nil, false, nil, postCommit)
+	result, err := store.TransitionState("pc-fail", TaskStateProcessing, "test", "reason", nil, false, false, nil, nil, postCommit)
 	if err != nil {
 		t.Fatalf("TransitionState should succeed even if postCommit fails: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestTransitionState_SetRetryCount(t *testing.T) {
 	}
 
 	retryCount := 3
-	result, err := store.TransitionState("retry", TaskStateProcessing, "test", "retry", nil, false, &retryCount, nil)
+	result, err := store.TransitionState("retry", TaskStateProcessing, "test", "retry", nil, false, false, nil, &retryCount, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestTransitionState_ArchiveAndClear(t *testing.T) {
 
 	// 归档
 	now := time.Now()
-	result, err := store.TransitionState("archive", TaskStateCompleted, "test", "done", &now, false, nil, nil)
+	result, err := store.TransitionState("archive", TaskStateCompleted, "test", "done", &now, false, false, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestTransitionState_ArchiveAndClear(t *testing.T) {
 	}
 
 	// 清除归档（重试场景）
-	result2, err := store.TransitionState("archive", TaskStatePending, "test", "retry", nil, true, nil, nil)
+	result2, err := store.TransitionState("archive", TaskStatePending, "test", "retry", nil, true, false, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,10 +346,7 @@ func TestGetTaskState_TaskNotFound(t *testing.T) {
 
 func TestGetTaskTimeout_TaskNotFound(t *testing.T) {
 	store := NewTaskStore(db.NewMemoryDB(), 100)
-	config := &StateMachineConfig{
-		States: map[string]StateConfig{"pending": {StateTimeout: "30s"}},
-	}
-	checker := NewTimeoutChecker(store, config, 0, 0)
+	checker := NewTimeoutChecker(store, 0, 0)
 
 	_, err := checker.GetTaskTimeout("nonexistent")
 	if err == nil {
@@ -357,18 +354,18 @@ func TestGetTaskTimeout_TaskNotFound(t *testing.T) {
 	}
 }
 
-func TestGetTaskTimeout_NoStateTimeoutConfig(t *testing.T) {
+func TestGetTaskTimeout_NoTimeoutAt(t *testing.T) {
 	store := NewTaskStore(db.NewMemoryDB(), 100)
-	store.Create(&Task{ID: "no-cfg", State: TaskStatePending})
+	store.Create(&Task{ID: "no-tm", State: TaskStatePending})
 
-	config := &StateMachineConfig{
-		States: map[string]StateConfig{"pending": {}},
+	checker := NewTimeoutChecker(store, 0, 0)
+
+	got, err := checker.GetTaskTimeout("no-tm")
+	if err != nil {
+		t.Fatal(err)
 	}
-	checker := NewTimeoutChecker(store, config, 0, 0)
-
-	_, err := checker.GetTaskTimeout("no-cfg")
-	if err == nil {
-		t.Fatal("expected error for missing state_timeout config")
+	if got != nil {
+		t.Fatalf("expected nil timeout for task without TimeoutAt, got %v", got)
 	}
 }
 
@@ -377,10 +374,7 @@ func TestGetTaskTimeout_WithTimeoutAt(t *testing.T) {
 	timeoutAt := time.Now().Add(5 * time.Minute)
 	store.Create(&Task{ID: "has-timeout", State: TaskStatePending, TimeoutAt: &timeoutAt})
 
-	config := &StateMachineConfig{
-		States: map[string]StateConfig{"pending": {StateTimeout: "30s"}},
-	}
-	checker := NewTimeoutChecker(store, config, 0, 0)
+	checker := NewTimeoutChecker(store, 0, 0)
 
 	got, err := checker.GetTaskTimeout("has-timeout")
 	if err != nil {
@@ -391,34 +385,14 @@ func TestGetTaskTimeout_WithTimeoutAt(t *testing.T) {
 	}
 }
 
-func TestGetTaskTimeout_CalculatedFromState(t *testing.T) {
-	store := NewTaskStore(db.NewMemoryDB(), 100)
-	now := time.Now()
-	store.Create(&Task{ID: "calc", State: TaskStatePending, StateUpdatedAt: now})
-
-	config := &StateMachineConfig{
-		States: map[string]StateConfig{"pending": {StateTimeout: "1m"}},
-	}
-	checker := NewTimeoutChecker(store, config, 0, 0)
-
-	got, err := checker.GetTaskTimeout("calc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	expected := now.Add(time.Minute)
-	if got.Sub(expected) > time.Second || expected.Sub(*got) > time.Second {
-		t.Fatalf("expected ~%v, got %v", expected, *got)
-	}
-}
-
 func TestTimeoutCallback_Invoked(t *testing.T) {
 	store := NewTaskStore(db.NewMemoryDB(), 100)
-	store.Create(&Task{ID: "cb-task", State: TaskStatePending, StateUpdatedAt: time.Now().Add(-time.Hour)})
+	timeoutAt := time.Now().Add(-time.Hour)
+	store.Create(&Task{ID: "cb-task", State: TaskStatePending, TimeoutAt: &timeoutAt})
 
-	config := &StateMachineConfig{
-		States: map[string]StateConfig{"pending": {StateTimeout: "10s"}},
-	}
-	checker := NewTimeoutChecker(store, config, 0, 0)
+	checker := NewTimeoutChecker(store, 0, 0)
+	// rebuild 将过期 TimeoutAt 任务 deadline 设为 now
+	checker.rebuildHeap()
 
 	var called bool
 	var calledID string

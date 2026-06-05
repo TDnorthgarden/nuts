@@ -6,8 +6,6 @@
     "enabled": true,
     "id": "rule-1",
     "version": 1,
-    "action": "exec",
-    "command": "ls -al",
     "expansion": {}
   },
   {
@@ -17,8 +15,6 @@
     "enabled": true,
     "id": "rule-2",
     "version": 1,
-    "action": "exec",
-    "command": "echo 'alert: container stopped'",
     "expansion": {}
   },
   {
@@ -28,8 +24,6 @@
     "enabled": true,
     "id": "rule-3",
     "version": 1,
-    "action": "exec",
-    "command": "curl -s http://localhost:8080/api/v1/notify -d 'production container updated'",
     "expansion": {}
   },
   {
@@ -39,8 +33,6 @@
     "enabled": true,
     "id": "rule-4",
     "version": 1,
-    "action": "exec",
-    "command": "echo 'sandbox created'",
     "expansion": {
       "retry_count": 3,
       "timeout": 300,
@@ -55,8 +47,6 @@
     "enabled": true,
     "id": "rule-5",
     "version": 1,
-    "action": "exec",
-    "command": "echo 'task start detected'",
     "expansion": {
       "retry_count": 3,
       "timeout": 300,

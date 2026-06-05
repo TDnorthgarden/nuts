@@ -9,6 +9,9 @@ type Task struct {
 	// ID 任务唯一标识
 	ID string `json:"id"`
 
+	// TraceID 链路追踪ID，从数据源事件继承，用于端到端事件追踪
+	TraceID string `json:"trace_id,omitempty"`
+
 	// Name 任务名称
 	Name string `json:"name"`
 
@@ -172,11 +175,12 @@ type TaskStore interface {
 	// UpdateStateWithRecord 更新任务状态并记录详细信息
 	UpdateStateWithRecord(id string, state TaskState, triggeredBy, reason string) error
 
-	// TransitionState 原子化状态转换：在同一锁周期内完成状态、历史、ArchivedAt、RetryCount 更新。
+	// TransitionState 原子化状态转换：在同一锁周期内完成状态、历史、ArchivedAt、RetryCount、TimeoutAt 更新。
 	// setArchivedAt: 非 nil 则设为此值（用于归档终态任务）；clearArchived: true 则清空；两者都不则不变。
+	// clearTimeout: true 则清空 TimeoutAt；setTimeoutAt: 非 nil 则设为新值。setTimeoutAt 优先级高于 clearTimeout。
 	// setRetryCount: 非 nil 则更新 RetryCount。
 	// postCommit: 非 nil 时在状态持久化成功后调用（仍持有锁），用于发布事件等通知操作。失败不影响状态转换结果。
-	TransitionState(id string, newState TaskState, triggeredBy, reason string, setArchivedAt *time.Time, clearArchived bool, setRetryCount *int, postCommit func() error) (*Task, error)
+	TransitionState(id string, newState TaskState, triggeredBy, reason string, setArchivedAt *time.Time, clearArchived bool, clearTimeout bool, setTimeoutAt *time.Time, setRetryCount *int, postCommit func() error) (*Task, error)
 
 	// GetStateHistory 获取任务状态历史
 	GetStateHistory(id string) ([]StateTransitionRecord, error)
